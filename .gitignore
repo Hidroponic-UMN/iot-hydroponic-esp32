@@ -1,4 +1,6 @@
 .pio/
 .vscode/
-lib/
+lib/ArduinoJson/
+lib/DHT/
+lib/pubsubclient/
 test/
