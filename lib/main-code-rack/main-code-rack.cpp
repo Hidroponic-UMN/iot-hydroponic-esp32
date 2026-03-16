@@ -39,11 +39,13 @@
 // ============================================================
 
 #define RACK_ID         1                    // Ubah: 1, 2, 3, 4, atau 5
-#define WIFI_SSID       "ACES"      // Ubah: nama WiFi
-#define WIFI_PASSWORD   "bukanuntukifdansi"         // Ubah: password WiFi
-#define MQTT_SERVER     "192.168.1.121"       // Ubah: IP server Docker
+#define TYPE_ID         1                    // Tipe sensor buat apa, e.g. Sensor buat ukur temp ruangan -> id = 1
+#define DESC_DEVICE     "Buat Rack Hydroponic"
+#define WIFI_SSID       "FUNHOUSE 1B"      // Ubah: nama WiFi
+#define WIFI_PASSWORD   "T554022v23"         // Ubah: password WiFi
+#define MQTT_SERVER     "192.168.3.118"       // Ubah: IP server Docker
 #define MQTT_PORT       1883
-#define SEND_INTERVAL   5000                  // Kirim data setiap 5 detik
+#define SEND_INTERVAL   60000                  // Kirim data setiap 60 detik
 
 #define MQTT_USER       "esp32-1"
 #define MQTT_PASSWORD   "rack1"
@@ -55,9 +57,14 @@
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
 
+String mac_addr = "f4c1e01b-46e7-42c5-9f69-05d67a5a6a5b";
 char mqtt_topic[32];
 char client_id[32];
 unsigned long lastSend = 0;
+
+const char* cmd_Topic = ("rack/"+ String(RACK_ID) + "/cmd").c_str();
+const char* ack_cmd_Topic = ("rack/"+ String(RACK_ID) + "/cmd/ack").c_str();
+
 
 // Simulated sensor values (drift around realistic targets)
 float sim_ph          = 6.0;
@@ -139,7 +146,10 @@ void connectMQTT() {
   while (!mqtt.connected()) {
     if (mqtt.connect(client_id, MQTT_USER, MQTT_PASSWORD)) {
       Serial.printf("✅ MQTT connected as '%s'\n", client_id);
-      Serial.printf("📤 Publishing to topic: %s\n\n", mqtt_topic);
+      Serial.printf("📤 Publishing to topic: %s\n", mqtt_topic);
+
+      mqtt.subscribe(cmd_Topic);
+      Serial.printf("SUbscribing to topic: %s\n\n", cmd_Topic);
     } else {
       Serial.printf("❌ MQTT failed (rc=%d). Retrying in 3s...\n", mqtt.state());
       delay(3000);
@@ -149,13 +159,14 @@ void connectMQTT() {
 
 bool isRegistered = false;
 void registerDevice() {
-
   JsonDocument doc;
 
-  doc["mac_addr"] = "123";
-
-  JsonObject desc = doc["desc"].to<JsonObject>();
+  doc["mac_addr"] = mac_addr;
+  doc["type_id"] = TYPE_ID;
+  doc["desc"] = DESC_DEVICE;
+  JsonObject desc = doc["attr"].to<JsonObject>();
   desc["about"] = "ini esp32 untuk rack " + String(RACK_ID);
+  desc["rack_id"] = String(RACK_ID);
 
   char payload[256];
   serializeJson(doc, payload);
@@ -166,6 +177,69 @@ void registerDevice() {
     isRegistered = true;
   } else {
     Serial.println("❌ Device registration failed");
+  }
+}
+
+// ============================================================
+//  Deserialize String to JSON
+// ============================================================
+bool parseJSON(char* json_obj, JsonDocument& doc) {
+  DeserializationError err = deserializeJson(doc, json_obj);
+
+  if (err) {
+    Serial.println("deserialized JSON failed");
+    return false;
+  }
+  return true;
+}
+
+// ============================================================
+//  Run Command for Actuator
+// ============================================================
+enum statusType {
+  FAILED = -1,
+  SUCCESS = 1
+};
+
+statusType runCommand(const char* cmdType) {
+  return SUCCESS;
+}
+
+// ============================================================
+//  MQTT callback
+// ============================================================
+void callBack(char* topic, byte* payload, unsigned int length) {
+  Serial.print("Message Arrived on topic: ");
+  Serial.println(topic);
+
+  JsonDocument doc;
+  char* string_json = (char*) payload;
+  bool checkTopic = (strcmp(topic, cmd_Topic) == 0);
+
+  parseJSON(string_json, doc);
+  const char* cmdType = doc["command"];
+
+  // IF Topic equals to rack/{RACK_ID}/cmd
+  // OR ...
+  Serial.println(cmdType);
+  if (checkTopic) {
+    char payload[300];
+    statusType t = runCommand(cmdType);
+
+    switch (t) {
+      case -1:
+        doc["status"] = "FAILED";
+        serializeJson(doc, payload);
+        break;
+      case 1:
+        doc["status"] = "SUCCESS";
+        serializeJson(doc, payload);
+        break;
+      default:
+        break;
+    }
+
+    mqtt.publish(ack_cmd_Topic, payload);
   }
 }
 
@@ -200,6 +274,7 @@ void setup() {
 
   // Connect
   mqtt.setServer(MQTT_SERVER, MQTT_PORT);
+  mqtt.setCallback(callBack);
   connectWiFi();
   connectMQTT();
 }
@@ -224,13 +299,13 @@ void loop() {
     // Build JSON payload
     JsonDocument root;
 
-    root["mac_addr"] = "123";
+    root["mac_addr"] = mac_addr;
 
     JsonObject data = root["data"].to<JsonObject>();
 
     generateSimulatedData(data);
 
-    char payload[256];
+    char payload[300];
     serializeJson(root, payload);
 
     // Publish to MQTT
