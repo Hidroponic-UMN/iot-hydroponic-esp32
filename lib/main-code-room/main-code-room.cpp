@@ -39,6 +39,10 @@
 #define MQTT_SERVER     "192.168.1.100"       // Ubah: IP server Docker
 #define MQTT_PORT       1883
 
+#define TYPE_ID         2
+#define RACK_ID         0
+#define DESC_DEVICE     "Device untuk ukur temp dan humidity"
+
 #define DHT_PIN         4                     // Pin data DHT22
 #define DHT_TYPE        DHT22
 #define SEND_INTERVAL   5000                  // Kirim setiap 5 detik
@@ -52,6 +56,8 @@ PubSubClient mqtt(espClient);
 DHT dht(DHT_PIN, DHT_TYPE);
 
 unsigned long lastSend = 0;
+
+String mac_addr = "c7b7fae9-34f6-4cc9-8f48-03c295629ed3";
 
 // ============================================================
 //  WiFi connection + auto-reconnect
@@ -95,6 +101,29 @@ void connectMQTT() {
       Serial.printf("❌ MQTT failed (rc=%d). Retry in 3s...\n", mqtt.state());
       delay(3000);
     }
+  }
+}
+
+bool isRegistered = false;
+void registerDevice() {
+  JsonDocument doc;
+
+  doc["mac_addr"] = mac_addr;
+  doc["type_id"] = TYPE_ID;
+  doc["desc"] = DESC_DEVICE;
+  JsonObject desc = doc["attr"].to<JsonObject>();
+  desc["about"] = "ini esp32 untuk rack " + String(RACK_ID);
+  desc["rack_id"] = String(RACK_ID);
+
+  char payload[256];
+  serializeJson(doc, payload);
+
+  if (mqtt.publish("device/register", payload)) {
+    Serial.println("✅ Device registration sent");
+    Serial.println(payload);
+    isRegistered = true;
+  } else {
+    Serial.println("❌ Device registration failed");
   }
 }
 
@@ -153,6 +182,9 @@ void loop() {
   connectWiFi();
   if (!mqtt.connected()) connectMQTT();
   mqtt.loop();
+  if (!isRegistered) {
+    registerDevice();
+  }
 
   if (millis() - lastSend >= SEND_INTERVAL) {
     lastSend = millis();
