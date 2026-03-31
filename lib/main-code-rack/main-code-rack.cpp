@@ -42,17 +42,21 @@
 //  ⚡ CONFIG — UBAH INI PER ESP32
 // ============================================================
 
+// mosquitto_pub -h localhost -t device/register -m '{"mac_addr":"abdgb1-378ahb","type_id":"HYDROPONIC_RACKS","desc":"Buat Rack Hydroponic","attr":{"about":"ini esp32 untuk rack 1","rack_id":"1"}}' -u admin_lab -P admin123
+
+#define TYPE_ID         "HYDROPONIC_RACKS"                    // Tipe sensor buat apa, e.g. HYDROPONIC_RACKS
 #define RACK_ID         1                    // Ubah: 1, 2, 3, 4, atau 5
-#define TYPE_ID         1                    // Tipe sensor buat apa, e.g. Sensor buat ukur temp ruangan -> id = 1
 #define DESC_DEVICE     "Buat Rack Hydroponic"
+
 #define WIFI_SSID       "ACES"      // Ubah: nama WiFi
 #define WIFI_PASSWORD   "bukanuntukifdansi"         // Ubah: password WiFi
-#define MQTT_SERVER     "192.168.1.249"       // Ubah: IP server Docker
-#define MQTT_PORT       1883
-#define SEND_INTERVAL   1000                  // Kirim data setiap 60 detik
 
+#define MQTT_SERVER     "192.168.1.121"       // Ubah: IP server Docker
+#define MQTT_PORT       1883
 #define MQTT_USER       "esp32-1"
 #define MQTT_PASSWORD   "rack1"
+
+#define SEND_INTERVAL   5000                  // Kirim data setiap 60 detik
 
 
 // ============================================================
@@ -61,8 +65,8 @@
 #define SDA_PIN 21
 #define SCL_PIN 22
 #define ONE_WIRE_PIN 4
-#define ANALOG_PIN 35
-#define DIGITAL_PIN 33
+#define TDS_PIN 35
+#define PH_PIN 33
 
 
 // ============================================================
@@ -87,51 +91,18 @@ unsigned long lastSend = 0;
 char cmd_Topic[32];
 char ack_cmd_Topic[48];
 
-// Simulated sensor values (drift around realistic targets)
-float sim_ph          = 6.0;
-float sim_ec          = 1.8;
-float sim_water_temp  = 25.0;
-float sim_water_level = 70.0;
-float sim_water_flow  = 3.0;
-float sim_light       = 20000.0;
-float sim_air_temp = 24.0;
-
-// ============================================================
-//  Drift function — membuat data bergerak realistis
-// ============================================================
-float drift(float current, float target, float minVal, float maxVal, float volatility) {
-  float range = maxVal - minVal;
-  float noise = (random(-1000, 1001) / 1000.0) * volatility * range * 0.02;
-  float pull  = (target - current) * 0.01;
-  float result = current + noise + pull;
-  return constrain(result, minVal, maxVal);
-}
-
 // ============================================================
 //  Generate simulated sensor data
 //  ★ GANTI FUNGSI INI dengan pembacaan sensor asli nanti ★
 // ============================================================
-void generateSimulatedData(JsonObject doc) {
+void generateData(JsonObject doc) {
   watertemp.requestTemperatures();
   delay(100);
-  // Drift values around realistic targets
-  // sim_ph          = drift(sim_ph,          6.0,    4.0,   8.0,   0.15);
-  // sim_ec          = drift(sim_ec,          1.8,    0.5,   3.5,   0.15);
-  // sim_water_temp  = drift(sim_water_temp,  25.0,   18.0,  32.0,  0.2);
-  // sim_water_level = drift(sim_water_level, 70.0,   10.0,  100.0, 0.1);
-  // sim_water_flow  = drift(sim_water_flow,  3.0,    0.5,   6.0,   0.3);
-  // sim_light       = drift(sim_light,       20000,  5000,  40000, 0.2);
-  // sim_air_temp    = drift(sim_air_temp,    24.0,  18.0, 35.0, 0.2);
-
   // Round to realistic precision
-  doc["ph"]               = digitalRead(DIGITAL_PIN);          // 6.02
-  doc["ec"]               = analogRead(ANALOG_PIN);          // 1.82
+  doc["ph"]               = analogRead(PH_PIN);          // 6.02
+  doc["ec"]               = analogRead(TDS_PIN);          // 1.82
   doc["water_temp"]       = watertemp.getTempCByIndex(0);    // 25.1
-  Serial.println(watertemp.getTempCByIndex(0));
-  // doc["water_level"]      = round(sim_water_level);                // 70
-  // doc["water_flow"]       = round(sim_water_flow * 10) / 10.0;    // 3.1
   doc["light_intensity"]  = luxmeter.readLightLevel();                      // 20155
-  // doc["air_temp"]         = round(sim_air_temp * 10) / 10.0;
 }
 
 // ============================================================
@@ -188,6 +159,7 @@ void registerDevice() {
   doc["mac_addr"] = mac_addr;
   doc["type_id"] = TYPE_ID;
   doc["desc"] = DESC_DEVICE;
+
   JsonObject desc = doc["attr"].to<JsonObject>();
   desc["about"] = "ini esp32 untuk rack " + String(RACK_ID);
   desc["rack_id"] = String(RACK_ID);
@@ -274,18 +246,6 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  // Seed random with noise from analog pin
-  randomSeed(analogRead(0) + millis());
-
-  // Add per-rack offset to make each rack unique
-  sim_ph          += (RACK_ID - 3) * 0.1;
-  sim_ec          += (RACK_ID - 3) * 0.05;
-  sim_water_temp  += (RACK_ID - 3) * 0.5;
-  sim_water_level += (RACK_ID - 3) * 5;
-  sim_water_flow  += (RACK_ID - 3) * 0.2;
-  sim_light       += (RACK_ID - 3) * 2000;
-  sim_air_temp    += (RACK_ID - 3) * 0.4;
-
   // Build topic and client ID
   snprintf(mqtt_topic, sizeof(mqtt_topic), "rack/%d/data", RACK_ID);
   snprintf(client_id, sizeof(client_id), "esp32-rack-%d", RACK_ID);
@@ -302,14 +262,14 @@ void setup() {
   Wire.begin(SDA_PIN, SCL_PIN);
   luxmeter.begin();
   watertemp.begin();
-  pinMode(DIGITAL_PIN, INPUT); // pH Sensor
-  pinMode(ANALOG_PIN, INPUT); // TDS Sensor
+  pinMode(PH_PIN, INPUT); // pH Sensor
+  pinMode(TDS_PIN, INPUT); // TDS Sensor
 
   // Connect
   mqtt.setServer(MQTT_SERVER, MQTT_PORT);
   mqtt.setCallback(callBack);
-  // connectWiFi();
-  // connectMQTT();
+  connectWiFi();
+  connectMQTT();
 }
 
 // ============================================================
@@ -317,54 +277,33 @@ void setup() {
 // ============================================================
 void loop() {
   // Ensure connections
-  // connectWiFi();
-  // if (!mqtt.connected()) connectMQTT();
-  // mqtt.loop();
+  connectWiFi();
+  if (!mqtt.connected()) connectMQTT();
+  mqtt.loop();
 
-  // if (!isRegistered) {
-  //   registerDevice();
-  // }
+  if (!isRegistered) {
+    registerDevice();
+  }
 
   // Send data at interval
   if (millis() - lastSend >= SEND_INTERVAL) {
     lastSend = millis();
 
     // Build JSON payload
-    JsonDocument root;
-
+    StaticJsonDocument<256> root;
     root["mac_addr"] = mac_addr;
-
     JsonObject data = root["data"].to<JsonObject>();
-
-    generateSimulatedData(data);
-
-    // ===== READ VALUES CORRECTLY =====
-    float ph            = data["ph"] | 0;
-    float ec            = data["ec"] | 0;
-    float water_temp    = data["water_temp"] | 0;
-    float light         = data["light_intensity"] | 0;
-
-    // ===== SERIAL DEBUG (EVERY SENSOR) =====
-    Serial.println("========== SENSOR READ ==========");
-    Serial.printf("pH            : %.2f\n", ph);
-    Serial.printf("EC (Analog)   : %.2f\n", ec);
-    Serial.printf("Water Temp    : %.2f °C\n", water_temp);
-    Serial.printf("Light (Lux)   : %.2f\n", light);
-    Serial.println("================================\n");
+    generateData(data);
 
     char payload[300];
-    serializeJson(root, payload);
+    serializeJsonPretty(root, payload);
+    Serial.println("JSON Payload:");
+    Serial.println(payload);
+    Serial.println();
 
     // Publish to MQTT
     if (mqtt.publish(mqtt_topic, payload)) {
-      Serial.printf("[%lu] ✅ Rack %d → pH=%.2f EC=%.2f T=%.1f°C L=%.0f\n",
-        millis() / 1000,
-        RACK_ID,
-        root["ph"].as<float>(),
-        root["ec"].as<float>(),
-        root["water_temp"].as<float>(),
-        root["light_intensity"].as<float>()
-      );
+      Serial.println("✅ Publish success");
     } else {
       Serial.println("❌ Publish failed!");
     }

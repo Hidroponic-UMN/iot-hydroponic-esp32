@@ -22,9 +22,11 @@
  */
 
 #if defined(ESP8266)
-    #include <ESP8266WiFi.h>
+  #include <ESP8266WiFi.h>
+  #include <ESP8266HTTPClient.h>
 #elif defined(ESP32)
-    #include <WiFi.h>
+  #include <WiFi.h>
+  #include <HTTPClient.h>
 #endif
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
@@ -34,14 +36,17 @@
 //  ⚡ CONFIG — UBAH SESUAI LAB
 // ============================================================
 
-#define WIFI_SSID       "Real"      // Ubah: nama WiFi
-#define WIFI_PASSWORD   "aqm3xppp"         // Ubah: password WiFi
-#define MQTT_SERVER     "192.168.1.100"       // Ubah: IP server Docker
-#define MQTT_PORT       1883
-
-#define TYPE_ID         2
+#define TYPE_ID         "ROOM_MONITORING"
 #define RACK_ID         0
 #define DESC_DEVICE     "Device untuk ukur temp dan humidity"
+
+#define WIFI_SSID       "ACES"      // Ubah: nama WiFi
+#define WIFI_PASSWORD   "bukanuntukifdansi"         // Ubah: password WiFi
+
+#define MQTT_SERVER     "192.168.1.121"       // Ubah: IP server Docker
+#define MQTT_PORT       1883
+#define MQTT_USER       "esp32-1"
+#define MQTT_PASSWORD   "rack1"
 
 #define DHT_PIN         4                     // Pin data DHT22
 #define DHT_TYPE        DHT22
@@ -50,13 +55,15 @@
 // ============================================================
 //  Internal — jangan diubah
 // ============================================================
-
+const char* SERVER_URL    = "http://172.18.0.1:3000/api/room";
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
 DHT dht(DHT_PIN, DHT_TYPE);
 
 unsigned long lastSend = 0;
 
+char mqtt_topic[32];
+char client_id[32];
 String mac_addr = "c7b7fae9-34f6-4cc9-8f48-03c295629ed3";
 
 // ============================================================
@@ -94,9 +101,9 @@ void connectMQTT() {
   Serial.printf("🔌 Connecting to MQTT: %s:%d...\n", MQTT_SERVER, MQTT_PORT);
 
   while (!mqtt.connected()) {
-    if (mqtt.connect("esp32-room-sensor")) {
+    if (mqtt.connect(client_id, MQTT_USER, MQTT_PASSWORD)) {
       Serial.println("✅ MQTT connected!");
-      Serial.println("📤 Publishing to: hidroponik/room\n");
+      Serial.printf("📤 Publishing to: %s\n", mqtt_topic);
     } else {
       Serial.printf("❌ MQTT failed (rc=%d). Retry in 3s...\n", mqtt.state());
       delay(3000);
@@ -141,17 +148,18 @@ void publishRoomData() {
   }
 
   // Build JSON
-  JsonDocument doc;
-  doc["temperature"] = round(temp * 10.0) / 10.0;  // 26.5
-  doc["humidity"]    = round(hum * 10.0) / 10.0;    // 62.0
+  StaticJsonDocument<256> root;
+  root["mac_addr"] = mac_addr;
+  JsonObject data = root["data"].to<JsonObject>();
+  data["temperature"] = round(temp * 10.0) / 10.0;
+  data["humidity"] = round(hum * 10.0) / 10.0;
 
   char payload[128];
-  serializeJson(doc, payload);
+  serializeJson(root, payload);
 
   // Publish
-  if (mqtt.publish("hidroponik/room", payload)) {
-    Serial.printf("[%lu] 🏠 Room: Temp=%.1f°C  Humidity=%.1f%%\n",
-      millis() / 1000, temp, hum);
+  if (mqtt.publish(mqtt_topic, payload)) {
+    Serial.printf("[%lu] 🏠 Room: Temp=%.1f°C  Humidity=%.1f%%\n", millis() / 1000, temp, hum);
   } else {
     Serial.println("❌ Publish failed!");
   }
@@ -168,6 +176,9 @@ void setup() {
   Serial.println("║  🏠 Room Sensor — Wemos + DHT22       ║");
   Serial.println("║  Topic: hidroponik/room               ║");
   Serial.println("╚══════════════════════════════════════╝\n");
+
+  snprintf(mqtt_topic, sizeof(mqtt_topic), "rack/%d/data", RACK_ID);
+  snprintf(client_id, sizeof(client_id), "esp32-room-sensor");
 
   dht.begin();
   mqtt.setServer(MQTT_SERVER, MQTT_PORT);
