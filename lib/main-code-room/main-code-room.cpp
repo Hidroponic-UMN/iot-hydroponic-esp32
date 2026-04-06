@@ -45,8 +45,8 @@
 
 #define MQTT_SERVER     "192.168.1.121"       // Ubah: IP server Docker
 #define MQTT_PORT       1883
-#define MQTT_USER       "esp32-1"
-#define MQTT_PASSWORD   "rack1"
+#define MQTT_USER       "esp32-2"
+#define MQTT_PASSWORD   "rack2"
 
 #define DHT_PIN         4                     // Pin data DHT22
 #define DHT_TYPE        DHT22
