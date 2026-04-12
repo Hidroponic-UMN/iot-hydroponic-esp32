@@ -61,9 +61,10 @@ PubSubClient mqtt(espClient);
 DHT dht(DHT_PIN, DHT_TYPE);
 
 unsigned long lastSend = 0;
-
+bool isRegistered = false;
 char mqtt_topic[32];
 char client_id[32];
+char signin_topic[32];
 String mac_addr = "c7b7fae9-34f6-4cc9-8f48-03c295629ed3";
 
 // ============================================================
@@ -111,7 +112,6 @@ void connectMQTT() {
   }
 }
 
-bool isRegistered = false;
 void registerDevice() {
   JsonDocument doc;
 
@@ -166,6 +166,18 @@ void publishRoomData() {
 }
 
 // ============================================================
+//  MQTT callback
+// ============================================================
+void callBack(char* topic, byte* payload, unsigned int length) {
+  Serial.print("Message Arrived on topic: ");
+  Serial.println(topic);
+
+  if (strcmp(topic, signin_topic) == 0) {
+    isRegistered = true;
+  }
+}
+
+// ============================================================
 //  Setup
 // ============================================================
 void setup() {
@@ -179,9 +191,11 @@ void setup() {
 
   snprintf(mqtt_topic, sizeof(mqtt_topic), "rack/%d/data", RACK_ID);
   snprintf(client_id, sizeof(client_id), "esp32-room-sensor");
+  snprintf(signin_topic, sizeof(signin_topic), "device/%d/register", RACK_ID);
 
   dht.begin();
   mqtt.setServer(MQTT_SERVER, MQTT_PORT);
+  mqtt.setCallback(callBack);
   connectWiFi();
   connectMQTT();
 }

@@ -1,29 +1,18 @@
 /*
  * ============================================================
- *  ESP32 Rack Sensor — Simulation Mode
+ *  ESP32 Rack Sensor — With pH & TDS Calibration
  *  Hidroponik Dashboard — Lab Smart Farming C502
  * ============================================================
  *
- *  Firmware ini untuk 5 ESP32 yang masing-masing merepresentasikan
- *  1 rak hidroponik. Data sensor disimulasikan (random realistis).
+ *  Added Features:
+ *  - pH sensor calibration with offset storage
+ *  - TDS sensor calibration with offset storage
+ *  - Automatic offset calculation
+ *  - Persistent storage using Preferences
  *
- *  CARA PAKAI:
- *  1. Install library di Arduino IDE:
- *     - PubSubClient (by Nick O'Leary)
- *     - ArduinoJson (by Benoit Blanchon)
- *
- *  2. Pilih board: "ESP32 Dev Module"
- *
- *  3. UBAH 3 CONFIG DI BAWAH sebelum upload ke tiap ESP32:
- *     - RACK_ID      → 1, 2, 3, 4, atau 5 (beda per ESP32)
- *     - WIFI_SSID    → nama WiFi lab
- *     - MQTT_SERVER  → IP komputer server (yang jalanin Docker)
- *
- *  4. Upload ke ESP32, buka Serial Monitor (115200 baud)
- *
- *  NANTI KALAU SENSOR FISIK SUDAH ADA:
- *  Ganti fungsi generateSimulatedData() dengan pembacaan sensor asli.
- *  Struktur JSON yang dikirim tetap sama.
+ *  CALIBRATION COMMANDS via MQTT:
+ *  pH:  {"command":"KALIBRASI_PH","cmd_log":{"known_value":7.0}}
+ *  TDS: {"command":"KALIBRASI_TDS","cmd_log":{"known_value":1330}}
  * ============================================================
  */
 #if defined(ESP8266)
@@ -37,27 +26,26 @@
 #include <ArduinoJson.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
+#include <Preferences.h>  // ★ Added for persistent storage
 
 // ============================================================
 //  ⚡ CONFIG — UBAH INI PER ESP32
 // ============================================================
 
-// mosquitto_pub -h localhost -t device/register -m '{"mac_addr":"abdgb1-378ahb","type_id":"HYDROPONIC_RACKS","desc":"Buat Rack Hydroponic","attr":{"about":"ini esp32 untuk rack 1","rack_id":"1"}}' -u admin_lab -P admin123
-
-#define TYPE_ID         "HYDROPONIC_RACKS"                    // Tipe sensor buat apa, e.g. HYDROPONIC_RACKS
-#define RACK_ID         1                    // Ubah: 1, 2, 3, 4, atau 5
+#define TYPE_ID         "HYDROPONIC_RACKS"
+#define RACK_ID         1
 #define DESC_DEVICE     "Buat Rack Hydroponic"
 
-#define WIFI_SSID       "ACES"      // Ubah: nama WiFi
-#define WIFI_PASSWORD   "bukanuntukifdansi"         // Ubah: password WiFi
+#define WIFI_SSID       "ACES"
+#define WIFI_PASSWORD   "bukanuntukifdansi"
 
-#define MQTT_SERVER     "192.168.1.121"       // Ubah: IP server Docker
+#define MQTT_SERVER     "192.168.1.121"
 #define MQTT_PORT       1883
 #define MQTT_USER       "esp32-1"
 #define MQTT_PASSWORD   "rack1"
 
-#define SEND_INTERVAL   5000                  // Kirim data setiap 60 detik
-
+#define SEND_INTERVAL   5000
+#define TIME_OUT_INTERVAL   60000
 
 // ============================================================
 //  Pins Out
@@ -68,41 +56,219 @@
 #define TDS_PIN 35
 #define PH_PIN 33
 
+// ============================================================
+//  Calibration Constants
+// ============================================================
+#define CALIBRATION_SAMPLES 50    // Number of readings to average
+#define SAMPLE_DELAY 100          // Delay between samples (ms)
+
+// Conversion factors (adjust based on your sensor specs)
+#define VREF 3.3                  // ESP32 ADC reference voltage
+#define ADC_RESOLUTION 4096.0     // 12-bit ADC
+#define PH_NEUTRAL_VOLTAGE 2.5    // Voltage at pH 7 (typical)
+#define PH_VOLTAGE_PER_UNIT 0.18  // mV per pH unit (typical)
 
 // ============================================================
-//  define Object
+//  Define Objects
 // ============================================================
 BH1750 luxmeter;
 OneWire oneWire(ONE_WIRE_PIN);
 DallasTemperature watertemp(&oneWire);
+Preferences preferences;  // ★ Preferences object for storage
 
 // ============================================================
-//  Internal variables — jangan diubah
+//  Internal variables
 // ============================================================
-
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
 
 String mac_addr = "f4c1e01b-46e7-42c5-9f69-05d67a5a6a5b";
+bool isRegistered = false;
 char mqtt_topic[32];
 char client_id[32];
 unsigned long lastSend = 0;
+unsigned long timeOut = 0;
 
 char cmd_Topic[32];
 char ack_cmd_Topic[48];
+char signin_topic[32];
+
+// Calibration offsets (loaded from Preferences)
+float ph_offset = 0.0;
+float tds_offset = 0.0;
+
+// Command definitions
+const char * cmd_PH_CALIBRATION = "KALIBRASI_PH";
+const char * cmd_TDS_CALIBRATION = "KALIBRASI_TDS";
 
 // ============================================================
-//  Generate simulated sensor data
-//  ★ GANTI FUNGSI INI dengan pembacaan sensor asli nanti ★
+//  Load calibration offsets from Preferences
+// ============================================================
+void loadCalibrationData() {
+  preferences.begin("calibration", false);
+  ph_offset = preferences.getFloat("ph_offset", 0.0);
+  tds_offset = preferences.getFloat("tds_offset", 0.0);
+  preferences.end();
+
+  Serial.println("\n📊 Loaded Calibration Data:");
+  Serial.printf("   pH Offset:  %.3f\n", ph_offset);
+  Serial.printf("   TDS Offset: %.2f ppm\n\n", tds_offset);
+}
+
+// ============================================================
+//  Save calibration offsets to Preferences
+// ============================================================
+void saveCalibrationData() {
+  preferences.begin("calibration", false);
+  preferences.putFloat("ph_offset", ph_offset);
+  preferences.putFloat("tds_offset", tds_offset);
+  preferences.end();
+
+  Serial.println("💾 Calibration data saved!");
+}
+
+// ============================================================
+//  Read raw ADC value with averaging
+// ============================================================
+float readADCAverage(int pin, int samples) {
+  long sum = 0;
+  for (int i = 0; i < samples; i++) {
+    sum += analogRead(pin);
+    delay(SAMPLE_DELAY);
+  }
+  return (float)sum / samples;
+}
+
+// ============================================================
+//  Convert raw pH ADC to pH value
+// ============================================================
+float convertToPH(int raw_adc) {
+  // Convert ADC to voltage
+  float voltage = (raw_adc / ADC_RESOLUTION) * VREF;
+
+  // Convert voltage to pH (typical pH sensor formula)
+  // pH = 7 - ((voltage - 2.5) / 0.18)
+  float ph = 7.0 - ((voltage - PH_NEUTRAL_VOLTAGE) / PH_VOLTAGE_PER_UNIT);
+
+  // Apply offset
+  ph += ph_offset;
+
+  return ph;
+}
+
+// ============================================================
+//  Convert raw TDS ADC to TDS/EC value
+// ============================================================
+float convertToTDS(int raw_adc, float temperature) {
+  // Convert ADC to voltage
+  float voltage = (raw_adc / ADC_RESOLUTION) * VREF;
+
+  // Temperature compensation coefficient
+  float compensationCoefficient = 1.0 + 0.02 * (temperature - 25.0);
+
+  // Voltage to TDS conversion (adjust based on your sensor)
+  float compensationVoltage = voltage / compensationCoefficient;
+  float tds = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage
+               - 255.86 * compensationVoltage * compensationVoltage
+               + 857.39 * compensationVoltage) * 0.5;
+
+  // Apply offset
+  tds += tds_offset;
+
+  return tds;
+}
+
+// ============================================================
+//  ★ pH CALIBRATION FUNCTION ★
+//  Automatically calculates offset to match known pH value
+// ============================================================
+bool calibratePH(float known_ph_value) {
+  Serial.println("\n🧪 Starting pH Calibration...");
+  Serial.printf("   Target pH: %.2f\n", known_ph_value);
+  Serial.println("   Taking readings...");
+
+  // Read current raw ADC value (averaged)
+  float raw_adc = readADCAverage(PH_PIN, CALIBRATION_SAMPLES);
+
+  // Convert to pH WITHOUT offset
+  float temp_offset = ph_offset;  // Store current offset
+  ph_offset = 0.0;  // Reset offset temporarily
+  float measured_ph = convertToPH((int)raw_adc);
+
+  // Calculate new offset
+  float new_offset = known_ph_value - measured_ph;
+  ph_offset = new_offset;
+
+  Serial.printf("   Raw ADC: %.2f\n", raw_adc);
+  Serial.printf("   Measured pH (no offset): %.2f\n", measured_ph);
+  Serial.printf("   Calculated Offset: %.3f\n", new_offset);
+  Serial.printf("   New pH (with offset): %.2f\n", convertToPH((int)raw_adc));
+
+  // Save to Preferences
+  saveCalibrationData();
+
+  Serial.println("✅ pH Calibration Complete!\n");
+  return true;
+}
+
+// ============================================================
+//  ★ TDS CALIBRATION FUNCTION ★
+//  Automatically calculates offset to match known TDS value
+// ============================================================
+bool calibrateTDS(float known_tds_value) {
+  Serial.println("\n🧪 Starting TDS Calibration...");
+  Serial.printf("   Target TDS: %.2f ppm\n", known_tds_value);
+  Serial.println("   Taking readings...");
+
+  // Get water temperature for compensation
+  watertemp.requestTemperatures();
+  delay(100);
+  float temperature = watertemp.getTempCByIndex(0);
+
+  // Read current raw ADC value (averaged)
+  float raw_adc = readADCAverage(TDS_PIN, CALIBRATION_SAMPLES);
+
+  // Convert to TDS WITHOUT offset
+  float temp_offset = tds_offset;  // Store current offset
+  tds_offset = 0.0;  // Reset offset temporarily
+  float measured_tds = convertToTDS((int)raw_adc, temperature);
+
+  // Calculate new offset
+  float new_offset = known_tds_value - measured_tds;
+  tds_offset = new_offset;
+
+  Serial.printf("   Raw ADC: %.2f\n", raw_adc);
+  Serial.printf("   Water Temp: %.2f°C\n", temperature);
+  Serial.printf("   Measured TDS (no offset): %.2f ppm\n", measured_tds);
+  Serial.printf("   Calculated Offset: %.2f ppm\n", new_offset);
+  Serial.printf("   New TDS (with offset): %.2f ppm\n", convertToTDS((int)raw_adc, temperature));
+
+  // Save to Preferences
+  saveCalibrationData();
+
+  Serial.println("✅ TDS Calibration Complete!\n");
+  return true;
+}
+
+// ============================================================
+//  Generate sensor data with calibration applied
 // ============================================================
 void generateData(JsonObject doc) {
   watertemp.requestTemperatures();
   delay(100);
-  // Round to realistic precision
-  doc["ph"]               = analogRead(PH_PIN);          // 6.02
-  doc["ec"]               = analogRead(TDS_PIN);          // 1.82
-  doc["water_temp"]       = watertemp.getTempCByIndex(0);    // 25.1
-  doc["light_intensity"]  = luxmeter.readLightLevel();                      // 20155
+
+  float temperature = watertemp.getTempCByIndex(0);
+  int raw_ph = analogRead(PH_PIN);
+  int raw_tds = analogRead(TDS_PIN);
+
+  // Apply calibration
+  float calibrated_ph = convertToPH(raw_ph);
+  float calibrated_tds = convertToTDS(raw_tds, temperature);
+
+  doc["ph"] = round(calibrated_ph * 100) / 100.0;  // Round to 2 decimals
+  doc["ec"] = round(calibrated_tds * 100) / 100.0;
+  doc["water_temp"] = round(temperature * 10) / 10.0;
+  doc["light_intensity"] = luxmeter.readLightLevel();
 }
 
 // ============================================================
@@ -144,7 +310,7 @@ void connectMQTT() {
       Serial.printf("📤 Publishing to topic: %s\n", mqtt_topic);
 
       mqtt.subscribe(cmd_Topic);
-      Serial.printf("SUbscribing to topic: %s\n\n", cmd_Topic);
+      Serial.printf("📥 Subscribing to topic: %s\n\n", cmd_Topic);
     } else {
       Serial.printf("❌ MQTT failed (rc=%d). Retrying in 3s...\n", mqtt.state());
       delay(3000);
@@ -152,7 +318,6 @@ void connectMQTT() {
   }
 }
 
-bool isRegistered = false;
 void registerDevice() {
   JsonDocument doc;
 
@@ -167,10 +332,9 @@ void registerDevice() {
   char payload[256];
   serializeJson(doc, payload);
 
-  if (mqtt.publish("device/register", payload)) {
+  if (mqtt.publish(signin_topic, payload)) {
     Serial.println("✅ Device registration sent");
     Serial.println(payload);
-    isRegistered = true;
   } else {
     Serial.println("❌ Device registration failed");
   }
@@ -194,11 +358,34 @@ bool parseJSON(char* json_obj, JsonDocument& doc) {
 // ============================================================
 enum statusType {
   FAILED = -1,
-  SUCCESS = 1
+  SUCCESS = 1,
+  PENDING = 0
 };
 
-statusType runCommand(const char* cmdType) {
-  return SUCCESS;
+statusType runCommand(const char* cmdType, JsonObject doc) {
+  // ★ pH Calibration Command
+  if (strcmp(cmdType, cmd_PH_CALIBRATION) == 0) {
+    float known_value = doc["known_value"] | 7.0;  // Default to pH 7 if not provided
+
+    if (calibratePH(known_value)) {
+      return SUCCESS;
+    } else {
+      return FAILED;
+    }
+  }
+
+  // ★ TDS Calibration Command
+  else if (strcmp(cmdType, cmd_TDS_CALIBRATION) == 0) {
+    float known_value = doc["known_value"] | 1330.0;  // Default to 1330 ppm if not provided
+
+    if (calibrateTDS(known_value)) {
+      return SUCCESS;
+    } else {
+      return FAILED;
+    }
+  }
+
+  return PENDING;
 }
 
 // ============================================================
@@ -208,34 +395,44 @@ void callBack(char* topic, byte* payload, unsigned int length) {
   Serial.print("Message Arrived on topic: ");
   Serial.println(topic);
 
-  JsonDocument doc;
-  char* string_json = (char*) payload;
-  bool checkTopic = (strcmp(topic, cmd_Topic) == 0);
-
-  parseJSON(string_json, doc);
-  const char* cmdType = doc["command"];
-
-  // IF Topic equals to rack/{RACK_ID}/cmd
-  // OR ...
-  Serial.println(cmdType);
-  if (checkTopic) {
+  if (strcmp(topic, cmd_Topic) == 0) {
+    StaticJsonDocument<256> root;
+    JsonObject doc = root["cmd_log"].to<JsonObject>();
+    char* string_json = (char*) payload;
+    parseJSON(string_json, root);
     char payload[300];
-    statusType t = runCommand(cmdType);
+    const char* cmdType = root["command"];
+    bool looping = true;
+    timeOut = millis();  // Start timeout timer
 
-    switch (t) {
-      case -1:
-        doc["status"] = "FAILED";
-        serializeJson(doc, payload);
-        break;
-      case 1:
-        doc["status"] = "SUCCESS";
-        serializeJson(doc, payload);
-        break;
-      default:
-        break;
+    while(looping) {
+      statusType t = runCommand(cmdType, doc);
+      switch (t) {
+        case FAILED:
+          root["status"] = "FAILED";
+          serializeJson(root, payload);
+          looping = false;
+          break;
+        case SUCCESS:
+          root["status"] = "SUCCESS";
+          serializeJson(root, payload);
+          looping = false;
+          break;
+        case PENDING:
+          // Keep looping
+          break;
+      }
+
+      if (millis() - timeOut >= TIME_OUT_INTERVAL) {
+        root["status"] = "TIMEOUT";
+        serializeJson(root, payload);
+        looping = false;
+      }
     }
-
     mqtt.publish(ack_cmd_Topic, payload);
+
+  } else if (strcmp(topic, signin_topic) == 0) {
+    isRegistered = true;
   }
 }
 
@@ -251,19 +448,23 @@ void setup() {
   snprintf(client_id, sizeof(client_id), "esp32-rack-%d", RACK_ID);
   snprintf(cmd_Topic,      sizeof(cmd_Topic),      "rack/%d/cmd",     RACK_ID);
   snprintf(ack_cmd_Topic,  sizeof(ack_cmd_Topic),  "rack/%d/cmd/ack", RACK_ID);
+  snprintf(signin_topic, sizeof(signin_topic), "device/%d/register", RACK_ID);
 
   Serial.println("╔══════════════════════════════════════╗");
-  Serial.println("║  🌱 ESP32 Rack Sensor — Simulasi     ║");
+  Serial.println("║  🌱 ESP32 Rack Sensor — Calibrated   ║");
   Serial.printf( "║  Rack ID: %d                          ║\n", RACK_ID);
   Serial.printf( "║  Topic:   %s      ║\n", mqtt_topic);
   Serial.println("╚══════════════════════════════════════╝");
 
-  // Begin sensor
+  // Load calibration data from Preferences
+  loadCalibrationData();
+
+  // Begin sensors
   Wire.begin(SDA_PIN, SCL_PIN);
   luxmeter.begin();
   watertemp.begin();
-  pinMode(PH_PIN, INPUT); // pH Sensor
-  pinMode(TDS_PIN, INPUT); // TDS Sensor
+  pinMode(PH_PIN, INPUT);
+  pinMode(TDS_PIN, INPUT);
 
   // Connect
   mqtt.setServer(MQTT_SERVER, MQTT_PORT);
