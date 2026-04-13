@@ -36,10 +36,10 @@
 #define RACK_ID         1
 #define DESC_DEVICE     "Buat Rack Hydroponic"
 
-#define WIFI_SSID       "ACES"
-#define WIFI_PASSWORD   "bukanuntukifdansi"
+#define WIFI_SSID       "Real"
+#define WIFI_PASSWORD   "aqm3xppp"
 
-#define MQTT_SERVER     "192.168.1.121"
+#define MQTT_SERVER     "10.34.184.30"
 #define MQTT_PORT       1883
 #define MQTT_USER       "esp32-1"
 #define MQTT_PASSWORD   "rack1"
@@ -92,6 +92,7 @@ unsigned long timeOut = 0;
 char cmd_Topic[32];
 char ack_cmd_Topic[48];
 char signin_topic[32];
+char signin_ack[32];
 
 // Calibration offsets (loaded from Preferences)
 float ph_offset = 0.0;
@@ -310,6 +311,7 @@ void connectMQTT() {
       Serial.printf("📤 Publishing to topic: %s\n", mqtt_topic);
 
       mqtt.subscribe(cmd_Topic);
+      mqtt.subscribe(signin_ack);
       Serial.printf("📥 Subscribing to topic: %s\n\n", cmd_Topic);
     } else {
       Serial.printf("❌ MQTT failed (rc=%d). Retrying in 3s...\n", mqtt.state());
@@ -358,16 +360,20 @@ bool parseJSON(char* json_obj, JsonDocument& doc) {
 // ============================================================
 enum statusType {
   FAILED = -1,
-  SUCCESS = 1,
-  PENDING = 0
+  PENDING_b = 0,
+  SUCCESS = 1
 };
 
-statusType runCommand(const char* cmdType, JsonObject doc) {
+statusType runCommand(const char* cmdType, JsonObject doc, StaticJsonDocument<512>& prev) {
   // ★ pH Calibration Command
   if (strcmp(cmdType, cmd_PH_CALIBRATION) == 0) {
     float known_value = doc["known_value"] | 7.0;  // Default to pH 7 if not provided
 
     if (calibratePH(known_value)) {
+      int raw_ph = analogRead(PH_PIN);
+      // Apply calibration
+      float calibrated_ph = convertToPH(raw_ph);
+      doc["ph"] = round(calibrated_ph * 100) / 100.0;
       return SUCCESS;
     } else {
       return FAILED;
@@ -379,13 +385,19 @@ statusType runCommand(const char* cmdType, JsonObject doc) {
     float known_value = doc["known_value"] | 1330.0;  // Default to 1330 ppm if not provided
 
     if (calibrateTDS(known_value)) {
+      watertemp.requestTemperatures();
+      delay(100);
+      float temperature = watertemp.getTempCByIndex(0);
+      int raw_tds = analogRead(TDS_PIN);
+      float calibrated_tds = convertToTDS(raw_tds, temperature);
+      doc["ec"] = round(calibrated_tds * 100) / 100.0;
       return SUCCESS;
     } else {
       return FAILED;
     }
   }
 
-  return PENDING;
+  return PENDING_b;
 }
 
 // ============================================================
@@ -396,17 +408,20 @@ void callBack(char* topic, byte* payload, unsigned int length) {
   Serial.println(topic);
 
   if (strcmp(topic, cmd_Topic) == 0) {
-    StaticJsonDocument<256> root;
-    JsonObject doc = root["cmd_log"].to<JsonObject>();
-    char* string_json = (char*) payload;
-    parseJSON(string_json, root);
-    char payload[300];
+    StaticJsonDocument<512> root;
+    DeserializationError error = deserializeJson(root, payload, length);
+    if (error) return;
+
     const char* cmdType = root["command"];
+    // Get a reference to the existing cmd_log object without clearing it
+    JsonObject cmdLog = root["cmd_log"].as<JsonObject>();
+
+    char payload[300];
     bool looping = true;
     timeOut = millis();  // Start timeout timer
 
     while(looping) {
-      statusType t = runCommand(cmdType, doc);
+      statusType t = runCommand(cmdType, cmdLog, root);
       switch (t) {
         case FAILED:
           root["status"] = "FAILED";
@@ -425,13 +440,13 @@ void callBack(char* topic, byte* payload, unsigned int length) {
 
       if (millis() - timeOut >= TIME_OUT_INTERVAL) {
         root["status"] = "TIMEOUT";
-        serializeJson(root, payload);
         looping = false;
       }
     }
+    Serial.println(payload);
+    serializeJson(root, payload);
     mqtt.publish(ack_cmd_Topic, payload);
-
-  } else if (strcmp(topic, signin_topic) == 0) {
+  } else if (strcmp(topic, signin_ack) == 0) {
     isRegistered = true;
   }
 }
@@ -449,6 +464,7 @@ void setup() {
   snprintf(cmd_Topic,      sizeof(cmd_Topic),      "rack/%d/cmd",     RACK_ID);
   snprintf(ack_cmd_Topic,  sizeof(ack_cmd_Topic),  "rack/%d/cmd/ack", RACK_ID);
   snprintf(signin_topic, sizeof(signin_topic), "device/%d/register", RACK_ID);
+  snprintf(signin_ack, sizeof(signin_ack), "device/%d/register/ack", RACK_ID);
 
   Serial.println("╔══════════════════════════════════════╗");
   Serial.println("║  🌱 ESP32 Rack Sensor — Calibrated   ║");
@@ -484,29 +500,29 @@ void loop() {
 
   if (!isRegistered) {
     registerDevice();
-  }
+  } else {
+    // Send data at interval
+    if (millis() - lastSend >= SEND_INTERVAL) {
+      lastSend = millis();
 
-  // Send data at interval
-  if (millis() - lastSend >= SEND_INTERVAL) {
-    lastSend = millis();
+      // Build JSON payload
+      StaticJsonDocument<256> root;
+      root["mac_addr"] = mac_addr;
+      JsonObject data = root["data"].to<JsonObject>();
+      generateData(data);
 
-    // Build JSON payload
-    StaticJsonDocument<256> root;
-    root["mac_addr"] = mac_addr;
-    JsonObject data = root["data"].to<JsonObject>();
-    generateData(data);
+      char payload[300];
+      serializeJsonPretty(root, payload);
+      Serial.println("JSON Payload:");
+      Serial.println(payload);
+      Serial.println();
 
-    char payload[300];
-    serializeJsonPretty(root, payload);
-    Serial.println("JSON Payload:");
-    Serial.println(payload);
-    Serial.println();
-
-    // Publish to MQTT
-    if (mqtt.publish(mqtt_topic, payload)) {
-      Serial.println("✅ Publish success");
-    } else {
-      Serial.println("❌ Publish failed!");
+      // Publish to MQTT
+      if (mqtt.publish(mqtt_topic, payload)) {
+        Serial.println("✅ Publish success");
+      } else {
+        Serial.println("❌ Publish failed!");
+      }
     }
   }
 }

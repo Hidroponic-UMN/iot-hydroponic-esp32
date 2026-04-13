@@ -40,10 +40,10 @@
 #define RACK_ID         0
 #define DESC_DEVICE     "Device untuk ukur temp dan humidity"
 
-#define WIFI_SSID       "ACES"      // Ubah: nama WiFi
-#define WIFI_PASSWORD   "bukanuntukifdansi"         // Ubah: password WiFi
+#define WIFI_SSID       "Real"      // Ubah: nama WiFi
+#define WIFI_PASSWORD   "aqm3xppp"         // Ubah: password WiFi
 
-#define MQTT_SERVER     "192.168.1.121"       // Ubah: IP server Docker
+#define MQTT_SERVER     "10.34.184.30"       // Ubah: IP server Docker
 #define MQTT_PORT       1883
 #define MQTT_USER       "esp32-2"
 #define MQTT_PASSWORD   "rack2"
@@ -55,7 +55,6 @@
 // ============================================================
 //  Internal — jangan diubah
 // ============================================================
-const char* SERVER_URL    = "http://172.18.0.1:3000/api/room";
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
 DHT dht(DHT_PIN, DHT_TYPE);
@@ -65,6 +64,7 @@ bool isRegistered = false;
 char mqtt_topic[32];
 char client_id[32];
 char signin_topic[32];
+char signin_ack [32];
 String mac_addr = "c7b7fae9-34f6-4cc9-8f48-03c295629ed3";
 
 // ============================================================
@@ -103,6 +103,7 @@ void connectMQTT() {
 
   while (!mqtt.connected()) {
     if (mqtt.connect(client_id, MQTT_USER, MQTT_PASSWORD)) {
+      mqtt.subscribe(signin_ack);
       Serial.println("✅ MQTT connected!");
       Serial.printf("📤 Publishing to: %s\n", mqtt_topic);
     } else {
@@ -125,10 +126,9 @@ void registerDevice() {
   char payload[256];
   serializeJson(doc, payload);
 
-  if (mqtt.publish("device/register", payload)) {
+  if (mqtt.publish(signin_topic, payload)) {
     Serial.println("✅ Device registration sent");
     Serial.println(payload);
-    isRegistered = true;
   } else {
     Serial.println("❌ Device registration failed");
   }
@@ -172,7 +172,7 @@ void callBack(char* topic, byte* payload, unsigned int length) {
   Serial.print("Message Arrived on topic: ");
   Serial.println(topic);
 
-  if (strcmp(topic, signin_topic) == 0) {
+  if (strcmp(topic, signin_ack) == 0) {
     isRegistered = true;
   }
 }
@@ -192,6 +192,7 @@ void setup() {
   snprintf(mqtt_topic, sizeof(mqtt_topic), "rack/%d/data", RACK_ID);
   snprintf(client_id, sizeof(client_id), "esp32-room-sensor");
   snprintf(signin_topic, sizeof(signin_topic), "device/%d/register", RACK_ID);
+  snprintf(signin_ack, sizeof(signin_ack), "device/%d/register/ack", RACK_ID);
 
   dht.begin();
   mqtt.setServer(MQTT_SERVER, MQTT_PORT);
@@ -209,10 +210,10 @@ void loop() {
   mqtt.loop();
   if (!isRegistered) {
     registerDevice();
-  }
-
-  if (millis() - lastSend >= SEND_INTERVAL) {
-    lastSend = millis();
-    publishRoomData();
+  } else {
+    if (millis() - lastSend >= SEND_INTERVAL) {
+      lastSend = millis();
+      publishRoomData();
+    }
   }
 }
