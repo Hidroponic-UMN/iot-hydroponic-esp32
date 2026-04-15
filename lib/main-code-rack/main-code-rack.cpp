@@ -102,30 +102,151 @@ float tds_offset = 0.0;
 const char * cmd_PH_CALIBRATION = "KALIBRASI_PH";
 const char * cmd_TDS_CALIBRATION = "KALIBRASI_TDS";
 
+/*
+ * ============================================================
+ *  IMPROVED CALIBRATION ALGORITHM
+ *  Two-point calibration with slope + offset for better accuracy
+ * ============================================================
+ */
+
 // ============================================================
-//  Load calibration offsets from Preferences
+//  Enhanced Calibration Storage
+// ============================================================
+
+// pH calibration data (two-point)
+struct PHCalibration {
+  float slope = 1.0;      // Default: no correction
+  float offset = 0.0;     // Default: no offset
+  bool is_calibrated = false;
+
+  // Store two calibration points
+  float point1_voltage = 0.0;
+  float point1_ph = 7.0;
+  float point2_voltage = 0.0;
+  float point2_ph = 4.0;
+  int num_points = 0;     // 0, 1, or 2 points calibrated
+};
+
+// TDS calibration data (two-point)
+struct TDSCalibration {
+  float slope = 1.0;
+  float offset = 0.0;
+  bool is_calibrated = false;
+
+  float point1_voltage = 0.0;
+  float point1_tds = 0.0;
+  float point2_voltage = 0.0;
+  float point2_tds = 1330.0;
+  int num_points = 0;
+};
+
+PHCalibration ph_cal;
+TDSCalibration tds_cal;
+
+
+// ============================================================
+//  Load calibration data from Preferences
 // ============================================================
 void loadCalibrationData() {
   preferences.begin("calibration", false);
-  ph_offset = preferences.getFloat("ph_offset", 0.0);
-  tds_offset = preferences.getFloat("tds_offset", 0.0);
+
+  // Load pH calibration
+  ph_cal.slope = preferences.getFloat("ph_slope", 1.0);
+  ph_cal.offset = preferences.getFloat("ph_offset", 0.0);
+  ph_cal.is_calibrated = preferences.getBool("ph_cal", false);
+  ph_cal.num_points = preferences.getInt("ph_points", 0);
+  ph_cal.point1_voltage = preferences.getFloat("ph_p1_v", 0.0);
+  ph_cal.point1_ph = preferences.getFloat("ph_p1_ph", 7.0);
+  ph_cal.point2_voltage = preferences.getFloat("ph_p2_v", 0.0);
+  ph_cal.point2_ph = preferences.getFloat("ph_p2_ph", 4.0);
+
+  // Load TDS calibration
+  tds_cal.slope = preferences.getFloat("tds_slope", 1.0);
+  tds_cal.offset = preferences.getFloat("tds_offset", 0.0);
+  tds_cal.is_calibrated = preferences.getBool("tds_cal", false);
+  tds_cal.num_points = preferences.getInt("tds_points", 0);
+  tds_cal.point1_voltage = preferences.getFloat("tds_p1_v", 0.0);
+  tds_cal.point1_tds = preferences.getFloat("tds_p1_tds", 0.0);
+  tds_cal.point2_voltage = preferences.getFloat("tds_p2_v", 0.0);
+  tds_cal.point2_tds = preferences.getFloat("tds_p2_tds", 1330.0);
+
   preferences.end();
 
   Serial.println("\n📊 Loaded Calibration Data:");
-  Serial.printf("   pH Offset:  %.3f\n", ph_offset);
-  Serial.printf("   TDS Offset: %.2f ppm\n\n", tds_offset);
+  Serial.printf("   pH - Slope: %.4f, Offset: %.3f, Points: %d, Calibrated: %s\n",
+                ph_cal.slope, ph_cal.offset, ph_cal.num_points,
+                ph_cal.is_calibrated ? "YES" : "NO");
+  Serial.printf("   TDS - Slope: %.4f, Offset: %.2f, Points: %d, Calibrated: %s\n\n",
+                tds_cal.slope, tds_cal.offset, tds_cal.num_points,
+                tds_cal.is_calibrated ? "YES" : "NO");
 }
 
+
 // ============================================================
-//  Save calibration offsets to Preferences
+//  Save calibration data to Preferences
 // ============================================================
 void saveCalibrationData() {
   preferences.begin("calibration", false);
-  preferences.putFloat("ph_offset", ph_offset);
-  preferences.putFloat("tds_offset", tds_offset);
+
+  // Save pH calibration
+  preferences.putFloat("ph_slope", ph_cal.slope);
+  preferences.putFloat("ph_offset", ph_cal.offset);
+  preferences.putBool("ph_cal", ph_cal.is_calibrated);
+  preferences.putInt("ph_points", ph_cal.num_points);
+  preferences.putFloat("ph_p1_v", ph_cal.point1_voltage);
+  preferences.putFloat("ph_p1_ph", ph_cal.point1_ph);
+  preferences.putFloat("ph_p2_v", ph_cal.point2_voltage);
+  preferences.putFloat("ph_p2_ph", ph_cal.point2_ph);
+
+  // Save TDS calibration
+  preferences.putFloat("tds_slope", tds_cal.slope);
+  preferences.putFloat("tds_offset", tds_cal.offset);
+  preferences.putBool("tds_cal", tds_cal.is_calibrated);
+  preferences.putInt("tds_points", tds_cal.num_points);
+  preferences.putFloat("tds_p1_v", tds_cal.point1_voltage);
+  preferences.putFloat("tds_p1_tds", tds_cal.point1_tds);
+  preferences.putFloat("tds_p2_v", tds_cal.point2_voltage);
+  preferences.putFloat("tds_p2_tds", tds_cal.point2_tds);
+
   preferences.end();
 
-  Serial.println("💾 Calibration data saved!");
+  Serial.println("💾 Calibration data saved to flash!");
+}
+
+
+// ============================================================
+//  Calculate two-point calibration (slope & offset)
+// ============================================================
+void calculateTwoPointCalibration(
+  float v1, float val1,   // First point (voltage, value)
+  float v2, float val2,   // Second point (voltage, value)
+  float &slope,           // Output: calculated slope
+  float &offset           // Output: calculated offset
+) {
+  // Avoid division by zero
+  if (abs(v2 - v1) < 0.001) {
+    Serial.println("⚠️ Warning: Calibration points too close, using default");
+    slope = 1.0;
+    offset = 0.0;
+    return;
+  }
+
+  // Calculate slope: (y2 - y1) / (x2 - x1)
+  slope = (val2 - val1) / (v2 - v1);
+
+  // Calculate offset: y = slope * x + offset  →  offset = y - slope * x
+  offset = val1 - (slope * v1);
+
+  Serial.printf("   Calculated Slope: %.4f\n", slope);
+  Serial.printf("   Calculated Offset: %.4f\n", offset);
+}
+
+
+// ============================================================
+//  Convert raw ADC to voltage
+// ============================================================
+float rawToVoltage(int raw_adc) {
+  return (raw_adc / ADC_RESOLUTION) * VREF;
 }
 
 // ============================================================
@@ -141,84 +262,162 @@ float readADCAverage(int pin, int samples) {
 }
 
 // ============================================================
-//  Convert raw pH ADC to pH value
+//  ★ IMPROVED pH CONVERSION ★
+//  Uses two-point calibration (slope + offset)
 // ============================================================
 float convertToPH(int raw_adc) {
   // Convert ADC to voltage
-  float voltage = (raw_adc / ADC_RESOLUTION) * VREF;
+  float voltage = rawToVoltage(raw_adc);
 
-  // Convert voltage to pH (typical pH sensor formula)
-  // pH = 7 - ((voltage - 2.5) / 0.18)
-  float ph = 7.0 - ((voltage - PH_NEUTRAL_VOLTAGE) / PH_VOLTAGE_PER_UNIT);
+  // Base pH calculation (theoretical)
+  float ph_base = 7.0 - ((voltage - PH_NEUTRAL_VOLTAGE) / PH_VOLTAGE_PER_UNIT);
 
-  // Apply offset
-  ph += ph_offset;
+  // Apply calibration: pH_calibrated = slope * pH_base + offset
+  if (ph_cal.is_calibrated) {
+    return (ph_cal.slope * ph_base) + ph_cal.offset;
+  }
 
-  return ph;
+  return ph_base;  // Return uncalibrated if not calibrated
 }
 
+
 // ============================================================
-//  Convert raw TDS ADC to TDS/EC value
+//  ★ IMPROVED TDS CONVERSION ★
+//  Uses two-point calibration (slope + offset)
 // ============================================================
 float convertToTDS(int raw_adc, float temperature) {
   // Convert ADC to voltage
-  float voltage = (raw_adc / ADC_RESOLUTION) * VREF;
+  float voltage = rawToVoltage(raw_adc);
 
-  // Temperature compensation coefficient
+  // Temperature compensation
   float compensationCoefficient = 1.0 + 0.02 * (temperature - 25.0);
-
-  // Voltage to TDS conversion (adjust based on your sensor)
   float compensationVoltage = voltage / compensationCoefficient;
-  float tds = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage
-               - 255.86 * compensationVoltage * compensationVoltage
-               + 857.39 * compensationVoltage) * 0.5;
 
-  // Apply offset
-  tds += tds_offset;
+  // Base TDS calculation (polynomial formula)
+  float tds_base = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage
+                    - 255.86 * compensationVoltage * compensationVoltage
+                    + 857.39 * compensationVoltage) * 0.5;
 
-  return tds;
+  // Apply calibration: TDS_calibrated = slope * TDS_base + offset
+  if (tds_cal.is_calibrated) {
+    return (tds_cal.slope * tds_base) + tds_cal.offset;
+  }
+
+  return tds_base;  // Return uncalibrated if not calibrated
 }
 
+
 // ============================================================
-//  ★ pH CALIBRATION FUNCTION ★
-//  Automatically calculates offset to match known pH value
+//  ★ IMPROVED pH CALIBRATION ★
+//  Supports both one-point and two-point calibration
 // ============================================================
 bool calibratePH(float known_ph_value) {
   Serial.println("\n🧪 Starting pH Calibration...");
   Serial.printf("   Target pH: %.2f\n", known_ph_value);
+  Serial.printf("   Current calibration points: %d\n", ph_cal.num_points);
   Serial.println("   Taking readings...");
 
-  // Read current raw ADC value (averaged)
+  // Read raw ADC (averaged for stability)
   float raw_adc = readADCAverage(PH_PIN, CALIBRATION_SAMPLES);
+  float voltage = rawToVoltage((int)raw_adc);
 
-  // Convert to pH WITHOUT offset
-  float temp_offset = ph_offset;  // Store current offset
-  ph_offset = 0.0;  // Reset offset temporarily
-  float measured_ph = convertToPH((int)raw_adc);
-
-  // Calculate new offset
-  float new_offset = known_ph_value - measured_ph;
-  ph_offset = new_offset;
+  // Calculate base pH (without calibration)
+  float base_ph = 7.0 - ((voltage - PH_NEUTRAL_VOLTAGE) / PH_VOLTAGE_PER_UNIT);
 
   Serial.printf("   Raw ADC: %.2f\n", raw_adc);
-  Serial.printf("   Measured pH (no offset): %.2f\n", measured_ph);
-  Serial.printf("   Calculated Offset: %.3f\n", new_offset);
-  Serial.printf("   New pH (with offset): %.2f\n", convertToPH((int)raw_adc));
+  Serial.printf("   Voltage: %.3f V\n", voltage);
+  Serial.printf("   Base pH (uncalibrated): %.2f\n", base_ph);
 
-  // Save to Preferences
+  // Determine if this is first or second calibration point
+  if (ph_cal.num_points == 0) {
+    // First calibration point
+    Serial.println("   → Setting as calibration point 1");
+
+    ph_cal.point1_voltage = voltage;
+    ph_cal.point1_ph = known_ph_value;
+    ph_cal.num_points = 1;
+
+    // Simple one-point calibration: just offset
+    ph_cal.slope = 1.0;
+    ph_cal.offset = known_ph_value - base_ph;
+    ph_cal.is_calibrated = true;
+
+    Serial.printf("   One-point calibration applied\n");
+    Serial.printf("   Offset: %.3f\n", ph_cal.offset);
+
+  } else if (ph_cal.num_points == 1) {
+    // Second calibration point - enable two-point calibration
+    Serial.println("   → Setting as calibration point 2");
+
+    // Check if pH values are different enough
+    if (abs(known_ph_value - ph_cal.point1_ph) < 1.0) {
+      Serial.println("⚠️ Warning: Calibration points should be at least 1 pH unit apart!");
+      Serial.println("   (Recommended: pH 4 and pH 7, or pH 7 and pH 10)");
+    }
+
+    ph_cal.point2_voltage = voltage;
+    ph_cal.point2_ph = known_ph_value;
+    ph_cal.num_points = 2;
+
+    // Calculate two-point calibration
+    // Map voltage range to pH range
+    calculateTwoPointCalibration(
+      ph_cal.point1_voltage, ph_cal.point1_ph,
+      ph_cal.point2_voltage, ph_cal.point2_ph,
+      ph_cal.slope, ph_cal.offset
+    );
+
+    ph_cal.is_calibrated = true;
+    Serial.println("   Two-point calibration applied!");
+
+  } else {
+    // Already have two points - replace closest one
+    Serial.println("   → Updating existing calibration point");
+
+    float dist1 = abs(known_ph_value - ph_cal.point1_ph);
+    float dist2 = abs(known_ph_value - ph_cal.point2_ph);
+
+    if (dist1 < dist2) {
+      // Update point 1
+      Serial.println("   Replacing calibration point 1");
+      ph_cal.point1_voltage = voltage;
+      ph_cal.point1_ph = known_ph_value;
+    } else {
+      // Update point 2
+      Serial.println("   Replacing calibration point 2");
+      ph_cal.point2_voltage = voltage;
+      ph_cal.point2_ph = known_ph_value;
+    }
+
+    // Recalculate calibration
+    calculateTwoPointCalibration(
+      ph_cal.point1_voltage, ph_cal.point1_ph,
+      ph_cal.point2_voltage, ph_cal.point2_ph,
+      ph_cal.slope, ph_cal.offset
+    );
+  }
+
+  // Save to flash
   saveCalibrationData();
 
+  // Test the calibration
+  float calibrated_ph = convertToPH((int)raw_adc);
+  Serial.printf("   ✅ New calibrated pH: %.2f (target: %.2f)\n", calibrated_ph, known_ph_value);
+  Serial.printf("   Error: %.3f pH units\n", abs(calibrated_ph - known_ph_value));
   Serial.println("✅ pH Calibration Complete!\n");
+
   return true;
 }
 
+
 // ============================================================
-//  ★ TDS CALIBRATION FUNCTION ★
-//  Automatically calculates offset to match known TDS value
+//  ★ IMPROVED TDS CALIBRATION ★
+//  Supports both one-point and two-point calibration
 // ============================================================
 bool calibrateTDS(float known_tds_value) {
   Serial.println("\n🧪 Starting TDS Calibration...");
   Serial.printf("   Target TDS: %.2f ppm\n", known_tds_value);
+  Serial.printf("   Current calibration points: %d\n", tds_cal.num_points);
   Serial.println("   Taking readings...");
 
   // Get water temperature for compensation
@@ -226,29 +425,178 @@ bool calibrateTDS(float known_tds_value) {
   delay(100);
   float temperature = watertemp.getTempCByIndex(0);
 
-  // Read current raw ADC value (averaged)
+  // Read raw ADC (averaged)
   float raw_adc = readADCAverage(TDS_PIN, CALIBRATION_SAMPLES);
+  float voltage = rawToVoltage((int)raw_adc);
 
-  // Convert to TDS WITHOUT offset
-  float temp_offset = tds_offset;  // Store current offset
-  tds_offset = 0.0;  // Reset offset temporarily
-  float measured_tds = convertToTDS((int)raw_adc, temperature);
-
-  // Calculate new offset
-  float new_offset = known_tds_value - measured_tds;
-  tds_offset = new_offset;
+  // Calculate base TDS (without calibration)
+  float compensationCoefficient = 1.0 + 0.02 * (temperature - 25.0);
+  float compensationVoltage = voltage / compensationCoefficient;
+  float base_tds = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage
+                    - 255.86 * compensationVoltage * compensationVoltage
+                    + 857.39 * compensationVoltage) * 0.5;
 
   Serial.printf("   Raw ADC: %.2f\n", raw_adc);
+  Serial.printf("   Voltage: %.3f V\n", voltage);
   Serial.printf("   Water Temp: %.2f°C\n", temperature);
-  Serial.printf("   Measured TDS (no offset): %.2f ppm\n", measured_tds);
-  Serial.printf("   Calculated Offset: %.2f ppm\n", new_offset);
-  Serial.printf("   New TDS (with offset): %.2f ppm\n", convertToTDS((int)raw_adc, temperature));
+  Serial.printf("   Base TDS (uncalibrated): %.2f ppm\n", base_tds);
 
-  // Save to Preferences
+  // Determine calibration point
+  if (tds_cal.num_points == 0) {
+    // First calibration point
+    Serial.println("   → Setting as calibration point 1");
+
+    tds_cal.point1_voltage = compensationVoltage;  // Store compensated voltage
+    tds_cal.point1_tds = known_tds_value;
+    tds_cal.num_points = 1;
+
+    // One-point calibration
+    tds_cal.slope = 1.0;
+    tds_cal.offset = known_tds_value - base_tds;
+    tds_cal.is_calibrated = true;
+
+    Serial.printf("   One-point calibration applied\n");
+    Serial.printf("   Offset: %.2f ppm\n", tds_cal.offset);
+
+  } else if (tds_cal.num_points == 1) {
+    // Second calibration point
+    Serial.println("   → Setting as calibration point 2");
+
+    // Check if TDS values are different enough
+    if (abs(known_tds_value - tds_cal.point1_tds) < 200) {
+      Serial.println("⚠️ Warning: Calibration points should be at least 200 ppm apart!");
+      Serial.println("   (Recommended: 0 ppm distilled water and 1330 ppm solution)");
+    }
+
+    tds_cal.point2_voltage = compensationVoltage;
+    tds_cal.point2_tds = known_tds_value;
+    tds_cal.num_points = 2;
+
+    // Calculate two-point calibration
+    calculateTwoPointCalibration(
+      tds_cal.point1_voltage, tds_cal.point1_tds,
+      tds_cal.point2_voltage, tds_cal.point2_tds,
+      tds_cal.slope, tds_cal.offset
+    );
+
+    tds_cal.is_calibrated = true;
+    Serial.println("   Two-point calibration applied!");
+
+  } else {
+    // Update existing point
+    Serial.println("   → Updating existing calibration point");
+
+    float dist1 = abs(known_tds_value - tds_cal.point1_tds);
+    float dist2 = abs(known_tds_value - tds_cal.point2_tds);
+
+    if (dist1 < dist2) {
+      Serial.println("   Replacing calibration point 1");
+      tds_cal.point1_voltage = compensationVoltage;
+      tds_cal.point1_tds = known_tds_value;
+    } else {
+      Serial.println("   Replacing calibration point 2");
+      tds_cal.point2_voltage = compensationVoltage;
+      tds_cal.point2_tds = known_tds_value;
+    }
+
+    // Recalculate
+    calculateTwoPointCalibration(
+      tds_cal.point1_voltage, tds_cal.point1_tds,
+      tds_cal.point2_voltage, tds_cal.point2_tds,
+      tds_cal.slope, tds_cal.offset
+    );
+  }
+
+  // Save to flash
   saveCalibrationData();
 
+  // Test the calibration
+  float calibrated_tds = convertToTDS((int)raw_adc, temperature);
+  Serial.printf("   ✅ New calibrated TDS: %.2f ppm (target: %.2f ppm)\n",
+                calibrated_tds, known_tds_value);
+  Serial.printf("   Error: %.2f ppm\n", abs(calibrated_tds - known_tds_value));
   Serial.println("✅ TDS Calibration Complete!\n");
+
   return true;
+}
+
+
+// ============================================================
+//  Reset calibration to factory defaults
+// ============================================================
+bool resetCalibration(const char* sensor_type) {
+  Serial.printf("\n🔄 Resetting %s calibration...\n", sensor_type);
+
+  preferences.begin("calibration", false);
+
+  if (strcmp(sensor_type, "PH") == 0 || strcmp(sensor_type, "ALL") == 0) {
+    ph_cal.slope = 1.0;
+    ph_cal.offset = 0.0;
+    ph_cal.is_calibrated = false;
+    ph_cal.num_points = 0;
+
+    preferences.putFloat("ph_slope", 1.0);
+    preferences.putFloat("ph_offset", 0.0);
+    preferences.putBool("ph_cal", false);
+    preferences.putInt("ph_points", 0);
+
+    Serial.println("   ✅ pH calibration reset");
+  }
+
+  if (strcmp(sensor_type, "TDS") == 0 || strcmp(sensor_type, "ALL") == 0) {
+    tds_cal.slope = 1.0;
+    tds_cal.offset = 0.0;
+    tds_cal.is_calibrated = false;
+    tds_cal.num_points = 0;
+
+    preferences.putFloat("tds_slope", 1.0);
+    preferences.putFloat("tds_offset", 0.0);
+    preferences.putBool("tds_cal", false);
+    preferences.putInt("tds_points", 0);
+
+    Serial.println("   ✅ TDS calibration reset");
+  }
+
+  preferences.end();
+  Serial.println("✅ Reset complete!\n");
+
+  return true;
+}
+
+
+// ============================================================
+//  Print calibration status
+// ============================================================
+void printCalibrationStatus() {
+  Serial.println("\n📊 CALIBRATION STATUS");
+  Serial.println("========================");
+
+  // pH Status
+  Serial.println("pH Sensor:");
+  Serial.printf("  Calibrated: %s\n", ph_cal.is_calibrated ? "YES" : "NO");
+  Serial.printf("  Points: %d\n", ph_cal.num_points);
+  Serial.printf("  Slope: %.4f\n", ph_cal.slope);
+  Serial.printf("  Offset: %.3f\n", ph_cal.offset);
+  if (ph_cal.num_points >= 1) {
+    Serial.printf("  Point 1: pH %.2f @ %.3fV\n", ph_cal.point1_ph, ph_cal.point1_voltage);
+  }
+  if (ph_cal.num_points >= 2) {
+    Serial.printf("  Point 2: pH %.2f @ %.3fV\n", ph_cal.point2_ph, ph_cal.point2_voltage);
+  }
+
+  Serial.println("\nTDS Sensor:");
+  Serial.printf("  Calibrated: %s\n", tds_cal.is_calibrated ? "YES" : "NO");
+  Serial.printf("  Points: %d\n", tds_cal.num_points);
+  Serial.printf("  Slope: %.4f\n", tds_cal.slope);
+  Serial.printf("  Offset: %.2f ppm\n", tds_cal.offset);
+  if (tds_cal.num_points >= 1) {
+    Serial.printf("  Point 1: %.0f ppm @ %.3fV\n", tds_cal.point1_tds, tds_cal.point1_voltage);
+  }
+  if (tds_cal.num_points >= 2) {
+    Serial.printf("  Point 2: %.0f ppm @ %.3fV\n", tds_cal.point2_tds, tds_cal.point2_voltage);
+  }
+
+  Serial.println("========================\n");
 }
 
 // ============================================================
