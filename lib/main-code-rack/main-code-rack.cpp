@@ -834,6 +834,8 @@ enum statusType {
   SUCCESS = 1
 };
 
+const char * cmd_RESET_CALIBRATION = "RESET_CALIBRATION";
+
 statusType runCommand(const char* cmdType, JsonObject doc, StaticJsonDocument<512>& prev) {
   // ★ pH Calibration Command
   if (strcmp(cmdType, cmd_PH_CALIBRATION) == 0) {
@@ -852,7 +854,7 @@ statusType runCommand(const char* cmdType, JsonObject doc, StaticJsonDocument<51
 
   // ★ TDS Calibration Command
   else if (strcmp(cmdType, cmd_TDS_CALIBRATION) == 0) {
-    float known_value = doc["known_value"] | 1330.0;  // Default to 1330 ppm if not provided
+    float known_value = doc["known_value"] | 1382.0;  // Default to 1382 ppm
 
     if (calibrateTDS(known_value)) {
       watertemp.requestTemperatures();
@@ -861,6 +863,21 @@ statusType runCommand(const char* cmdType, JsonObject doc, StaticJsonDocument<51
       int raw_tds = analogRead(TDS_PIN);
       float calibrated_tds = convertToTDS(raw_tds, temperature);
       doc["ec"] = round(calibrated_tds * 100) / 100.0;
+      return SUCCESS;
+    } else {
+      return FAILED;
+    }
+  }
+
+  // ★ Reset Calibration Command
+  else if (strcmp(cmdType, cmd_RESET_CALIBRATION) == 0) {
+    bool ph_ok = resetCalibration("PH");
+    bool tds_ok = resetCalibration("TDS");
+
+    if (ph_ok && tds_ok) {
+      doc["reset"] = "ALL";
+      doc["ph_calibrated"] = false;
+      doc["tds_calibrated"] = false;
       return SUCCESS;
     } else {
       return FAILED;
