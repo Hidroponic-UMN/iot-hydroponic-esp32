@@ -36,10 +36,10 @@
 #define RACK_ID         1
 #define DESC_DEVICE     "Buat Rack Hydroponic"
 
-#define WIFI_SSID       "Real"
-#define WIFI_PASSWORD   "aqm3xppp"
+#define WIFI_SSID       "seedlab"
+#define WIFI_PASSWORD   "davidbun"
 
-#define MQTT_SERVER     "10.34.184.30"
+#define MQTT_SERVER     "10.149.63.73"
 #define MQTT_PORT       1883
 #define MQTT_USER       "esp32-1"
 #define MQTT_PASSWORD   "rack1"
