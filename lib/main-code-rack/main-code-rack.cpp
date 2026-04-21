@@ -39,7 +39,7 @@
 #define WIFI_SSID       "seedlab"
 #define WIFI_PASSWORD   "davidbun"
 
-#define MQTT_SERVER     "10.149.63.73"
+#define MQTT_SERVER     "10.229.237.57"
 #define MQTT_PORT       1883
 #define MQTT_USER       "esp32-1"
 #define MQTT_PASSWORD   "rack1"
@@ -120,25 +120,17 @@ struct PHCalibration {
   bool is_calibrated = false;
 
   // For 1-point: use offset only
-  float offset = 0.0;
+  float offset = -147.00000077;
 
   // For 2-point: use linear (slope + offset)
-  float slope = 1.0;
-
-  // For 3-point: use quadratic (a*x^2 + b*x + c)
-  float coeff_a = 0.0;  // x^2 coefficient
-  float coeff_b = 1.0;  // x coefficient (slope)
-  float coeff_c = 0.0;  // constant (offset)
+  float slope = -0.066666667;
 
   // Store three calibration points
-  float point1_voltage = 0.0;
+  float point1_voltage = 2310.0;
   float point1_ph = 7.0;
 
-  float point2_voltage = 0.0;
+  float point2_voltage = 2355.0;
   float point2_ph = 4.0;
-
-  float point3_voltage = 0.0;
-  float point3_ph = 10.0;
 };
 
 // TDS calibration data (two-point)
@@ -165,19 +157,14 @@ void loadCalibrationData() {
   preferences.begin("calibration", false);
 
   // Load pH calibration
-  ph_cal.slope = preferences.getFloat("ph_slope", 1.0);
-  ph_cal.offset = preferences.getFloat("ph_offset", 0.0);
+  ph_cal.slope = preferences.getFloat("ph_slope", -0.066666667);
+  ph_cal.offset = preferences.getFloat("ph_offset", -147.00000077);
   ph_cal.is_calibrated = preferences.getBool("ph_cal", false);
   ph_cal.num_points = preferences.getInt("ph_points", 0);
-  ph_cal.point1_voltage = preferences.getFloat("ph_p1_v", 0.0);
+  ph_cal.point1_voltage = preferences.getFloat("ph_p1_v", 2310.0);
   ph_cal.point1_ph = preferences.getFloat("ph_p1_ph", 7.0);
-  ph_cal.point2_voltage = preferences.getFloat("ph_p2_v", 0.0);
+  ph_cal.point2_voltage = preferences.getFloat("ph_p2_v", 2355.0);
   ph_cal.point2_ph = preferences.getFloat("ph_p2_ph", 4.0);
-  ph_cal.point3_voltage = preferences.getFloat("ph_p3_v", 0.0);
-  ph_cal.point3_ph = preferences.getFloat("ph_p3_ph", 9.0);
-  ph_cal.coeff_a = preferences.getFloat("ph_coeff_a", 0.0);
-  ph_cal.coeff_b = preferences.getFloat("ph_coeff_b", 1.0);
-  ph_cal.coeff_c = preferences.getFloat("ph_coeff_c", 0.0);
 
   // Load TDS calibration
   tds_cal.slope = preferences.getFloat("tds_slope", 1.0);
@@ -216,11 +203,6 @@ void saveCalibrationData() {
   preferences.putFloat("ph_p1_ph", ph_cal.point1_ph);
   preferences.putFloat("ph_p2_v", ph_cal.point2_voltage);
   preferences.putFloat("ph_p2_ph", ph_cal.point2_ph);
-  preferences.putFloat("ph_p3_v", ph_cal.point3_voltage);
-  preferences.putFloat("ph_p3_ph", ph_cal.point3_ph);
-  preferences.putFloat("ph_coeff_a", 0.0);
-  preferences.putFloat("ph_coeff_b", 1.0);
-  preferences.putFloat("ph_coeff_c", 0.0);
 
   // Save TDS calibration
   preferences.putFloat("tds_slope", tds_cal.slope);
@@ -313,13 +295,11 @@ void calculateTwoPointCalibration(
   // Avoid division by zero
   if (abs(v2 - v1) < 0.001) {
     Serial.println("⚠️ Warning: Calibration points too close, using default");
-    slope = 1.0;
-    offset = 0.0;
     return;
   }
 
   // Calculate slope: (y2 - y1) / (x2 - x1)
-  slope = (val2 - val1) / (v2 - v1);
+  slope = (val1 - val2) / (v1 - v2);
 
   // Calculate offset: y = slope * x + offset  →  offset = y - slope * x
   offset = val1 - (slope * v1);
@@ -348,35 +328,86 @@ float readADCAverage(int pin, int samples) {
   return (float)sum / samples;
 }
 
+float readVoltage() {
+    const int NUM_SAMPLES = 20;        // Increased from 10 for better stability
+    const int DISCARD_SAMPLES = 4;     // Discard 4 lowest + 4 highest
+    const float ALPHA = 0.30;          // EMA filter coefficient (0.1-0.3)
+    static float ema_voltage = 0;      // Exponential Moving Average
+    static bool ema_initialized = false;
+
+    int samples[NUM_SAMPLES];
+
+    // 1. Collect samples with delay for ADC settling
+    for (int i = 0; i < NUM_SAMPLES; i++) {
+        samples[i] = analogRead(PH_PIN);
+        delay(20);  // ADC settling time
+    }
+
+    // 2. Sort samples (bubble sort)
+    for (int i = 0; i < NUM_SAMPLES - 1; i++) {
+        for (int j = i + 1; j < NUM_SAMPLES; j++) {
+            if (samples[i] > samples[j]) {
+                int temp = samples[i];
+                samples[i] = samples[j];
+                samples[j] = temp;
+            }
+        }
+    }
+
+    // 3. Remove outliers - discard lowest and highest values
+    int sum = 0;
+    int count = 0;
+    for (int i = DISCARD_SAMPLES; i < NUM_SAMPLES - DISCARD_SAMPLES; i++) {
+        sum += samples[i];
+        count++;
+    }
+
+    // 4. Calculate average of middle values
+    float avgValue = sum / (float)count;
+
+    // 5. Convert to voltage (mV)
+    float voltage = avgValue * (3300.0 / 4095.0);
+
+    // 6. Apply Exponential Moving Average (EMA) filter
+    if (!ema_initialized) {
+        ema_voltage = voltage;
+        ema_initialized = true;
+    } else {
+        ema_voltage = (ALPHA * voltage) + ((1.0 - ALPHA) * ema_voltage);
+    }
+
+    // 7. Optional: Apply median filter on final result
+    static float voltage_history[5] = {0};
+    static int history_index = 0;
+
+    voltage_history[history_index] = ema_voltage;
+    history_index = (history_index + 1) % 5;
+
+    // Sort history for median
+    float sorted_history[5];
+    memcpy(sorted_history, voltage_history, sizeof(voltage_history));
+    for (int i = 0; i < 4; i++) {
+        for (int j = i + 1; j < 5; j++) {
+            if (sorted_history[i] > sorted_history[j]) {
+                float temp = sorted_history[i];
+                sorted_history[i] = sorted_history[j];
+                sorted_history[j] = temp;
+            }
+        }
+    }
+
+    // Return median value (middle of 5 samples)
+    return sorted_history[2];
+}
+
 // ============================================================
 //  ★ IMPROVED pH CONVERSION ★
 //  Uses two-point calibration (slope + offset)
 // ============================================================
-float convertToPH(int raw_adc) {
+float convertToPH() {
   // Convert ADC to voltage
-  float voltage = rawToVoltage(raw_adc);
-
-  // Base pH calculation (theoretical)
-  float ph_base = 7.0 - ((voltage - PH_NEUTRAL_VOLTAGE) / PH_VOLTAGE_PER_UNIT);
-
-  // Apply calibration: pH_calibrated = slope * pH_base + offset
-  if (!ph_cal.is_calibrated) {
-    return ph_base;
-  }
-
-  if (ph_cal.num_points == 1) {
-    return ph_base + ph_cal.offset;
-  }
-
-  if (ph_cal.num_points == 2) {
-    return (ph_base * ph_cal.slope) + ph_cal.offset;
-  }
-
-  if (ph_cal.num_points == 3) {
-    float v_seq = voltage * voltage;
-    return (ph_cal.coeff_a * v_seq) + (ph_cal.coeff_b * voltage) + ph_cal.coeff_c;
-  }
-
+  float voltage = readVoltage();
+  float ph_base = (voltage * ph_cal.slope) + ph_cal.offset;
   return ph_base;  // Return uncalibrated if not calibrated
 }
 
@@ -426,14 +457,13 @@ bool calibratePH(float known_ph_value) {
   Serial.println("   Taking readings...");
 
   // Read raw ADC (averaged for stability)
-  float raw_adc = readADCAverage(PH_PIN, CALIBRATION_SAMPLES);
-  float voltage = rawToVoltage((int)raw_adc);
+  float voltage = readVoltage();
+  float voltage_per_unit = (7.0 - 4.0) / (ph_cal.point1_voltage - ph_cal.point2_voltage);
 
   // Calculate base pH (without calibration)
-  float base_ph = 7.0 - ((voltage - PH_NEUTRAL_VOLTAGE) / PH_VOLTAGE_PER_UNIT);
+  float base_ph = (voltage * ph_cal.slope) + ph_cal.offset;
 
-  Serial.printf("   Raw ADC: %.2f\n", raw_adc);
-  Serial.printf("   Voltage: %.3f V\n", voltage);
+  Serial.printf("   Voltage: %.3f mV\n", voltage);
   Serial.printf("   Base pH (uncalibrated): %.2f\n", base_ph);
 
   // Determine if this is first or second calibration point
@@ -445,15 +475,10 @@ bool calibratePH(float known_ph_value) {
     ph_cal.point1_ph = known_ph_value;
     ph_cal.num_points = 1;
 
-    // Simple one-point calibration: just offset
-    ph_cal.slope = 1.0;
-    ph_cal.offset = known_ph_value - base_ph;
-    ph_cal.is_calibrated = true;
-
     Serial.printf("   One-point calibration applied\n");
     Serial.printf("   Offset: %.3f\n", ph_cal.offset);
 
-  } else if (ph_cal.num_points == 1) {
+  } else if (ph_cal.num_points == 1 || known_ph_value == 7.0) {
     // Second calibration point - enable two-point calibration
     Serial.println("   → Setting as calibration point 2");
 
@@ -467,40 +492,9 @@ bool calibratePH(float known_ph_value) {
     ph_cal.point2_ph = known_ph_value;
     ph_cal.num_points = 2;
 
-    // Calculate two-point calibration
-    // Map voltage range to pH range
-    calculateTwoPointCalibration(
-      ph_cal.point1_voltage, ph_cal.point1_ph,
-      ph_cal.point2_voltage, ph_cal.point2_ph,
-      ph_cal.slope, ph_cal.offset
-    );
-
     ph_cal.is_calibrated = true;
     Serial.println("   Two-point calibration applied!");
 
-  } else if (ph_cal.num_points == 2) {
-    Serial.println("   → Setting as Point 3");
-
-    // Validate: should span a good range
-    float min_ph = min(ph_cal.point1_ph, ph_cal.point2_ph);
-    float max_ph = max(ph_cal.point1_ph, ph_cal.point2_ph);
-
-    if (known_ph_value > min_ph && known_ph_value < max_ph) {
-      Serial.printf("   ⚠️ Warning: Point 3 (%.1f) is between Point 1 and 2!\n", known_ph_value);
-      Serial.println("   For best 3-point calibration, use pH 4, 7, and 10");
-    }
-
-    ph_cal.point3_voltage = voltage;
-    ph_cal.point3_ph = known_ph_value;
-    ph_cal.num_points = 3;
-
-    // Three-point calibration: quadratic polynomial
-    bool success = calculateThreePointCalibration(
-      ph_cal.point1_voltage, ph_cal.point1_ph,
-      ph_cal.point2_voltage, ph_cal.point2_ph,
-      ph_cal.point3_voltage, ph_cal.point3_ph,
-      ph_cal.coeff_a, ph_cal.coeff_b, ph_cal.coeff_c
-    );
   } else {
     // First calibration point
     Serial.println("   → Setting as calibration point 1");
@@ -509,20 +503,25 @@ bool calibratePH(float known_ph_value) {
     ph_cal.point1_ph = known_ph_value;
     ph_cal.num_points = 1;
 
-    // Simple one-point calibration: just offset
-    ph_cal.slope = 1.0;
-    ph_cal.offset = known_ph_value - base_ph;
     ph_cal.is_calibrated = true;
 
     Serial.printf("   One-point calibration applied\n");
     Serial.printf("   Offset: %.3f\n", ph_cal.offset);
   }
 
+  // Calculate two-point calibration
+  // Map voltage range to pH range
+  calculateTwoPointCalibration(
+    ph_cal.point1_voltage, ph_cal.point1_ph,
+    ph_cal.point2_voltage, ph_cal.point2_ph,
+    ph_cal.slope, ph_cal.offset
+  );
+
   // Save to flash
   saveCalibrationData();
 
   // Test the calibration
-  float calibrated_ph = convertToPH((int)raw_adc);
+  float calibrated_ph = convertToPH();
   Serial.printf("   ✅ New calibrated pH: %.2f (target: %.2f)\n", calibrated_ph, known_ph_value);
   Serial.printf("   Error: %.3f pH units\n", abs(calibrated_ph - known_ph_value));
   Serial.println("✅ pH Calibration Complete!\n");
@@ -580,54 +579,6 @@ bool calibrateTDS(float known_tds_value) {
     Serial.printf("   Offset: %.2f ppm\n", tds_cal.offset);
 
   }
-  // else if (tds_cal.num_points == 1) {
-  //   // Second calibration point
-  //   Serial.println("   → Setting as calibration point 2");
-
-  //   // Check if TDS values are different enough
-  //   if (abs(known_tds_value - tds_cal.point1_tds) < 200) {
-  //     Serial.println("⚠️ Warning: Calibration points should be at least 200 ppm apart!");
-  //     Serial.println("   (Recommended: 0 ppm distilled water and 1330 ppm solution)");
-  //   }
-
-  //   tds_cal.point2_voltage = compensationVoltage;
-  //   tds_cal.point2_tds = known_tds_value;
-  //   tds_cal.num_points = 2;
-
-  //   // Calculate two-point calibration
-  //   calculateTwoPointCalibration(
-  //     tds_cal.point1_voltage, tds_cal.point1_tds,
-  //     tds_cal.point2_voltage, tds_cal.point2_tds,
-  //     tds_cal.slope, tds_cal.offset
-  //   );
-
-  //   tds_cal.is_calibrated = true;
-  //   Serial.println("   Two-point calibration applied!");
-
-  // } else {
-  //   // Update existing point
-  //   Serial.println("   → Updating existing calibration point");
-
-  //   float dist1 = abs(known_tds_value - tds_cal.point1_tds);
-  //   float dist2 = abs(known_tds_value - tds_cal.point2_tds);
-
-  //   if (dist1 < dist2) {
-  //     Serial.println("   Replacing calibration point 1");
-  //     tds_cal.point1_voltage = compensationVoltage;
-  //     tds_cal.point1_tds = known_tds_value;
-  //   } else {
-  //     Serial.println("   Replacing calibration point 2");
-  //     tds_cal.point2_voltage = compensationVoltage;
-  //     tds_cal.point2_tds = known_tds_value;
-  //   }
-
-  //   // Recalculate
-  //   calculateTwoPointCalibration(
-  //     tds_cal.point1_voltage, tds_cal.point1_tds,
-  //     tds_cal.point2_voltage, tds_cal.point2_tds,
-  //     tds_cal.slope, tds_cal.offset
-  //   );
-  // }
 
   // Save to flash
   saveCalibrationData();
@@ -652,13 +603,13 @@ bool resetCalibration(const char* sensor_type) {
   preferences.begin("calibration", false);
 
   if (strcmp(sensor_type, "PH") == 0 || strcmp(sensor_type, "ALL") == 0) {
-    ph_cal.slope = 1.0;
-    ph_cal.offset = 0.0;
+    ph_cal.slope = -0.066666667;
+    ph_cal.offset = -147.00000077;
     ph_cal.is_calibrated = false;
     ph_cal.num_points = 0;
 
-    preferences.putFloat("ph_slope", 1.0);
-    preferences.putFloat("ph_offset", 0.0);
+    preferences.putFloat("ph_slope", -0.066666667);
+    preferences.putFloat("ph_offset", -147.00000077);
     preferences.putBool("ph_cal", false);
     preferences.putInt("ph_points", 0);
 
@@ -733,7 +684,7 @@ void generateData(JsonObject doc) {
   int raw_tds = analogRead(TDS_PIN);
 
   // Apply calibration
-  float calibrated_ph = convertToPH(raw_ph);
+  float calibrated_ph = convertToPH();
   float calibrated_tds = convertToTDS(raw_tds, temperature);
 
   doc["ph"] = round(calibrated_ph * 100) / 100.0;  // Round to 2 decimals
@@ -842,9 +793,8 @@ statusType runCommand(const char* cmdType, JsonObject doc, StaticJsonDocument<51
     float known_value = doc["known_value"] | 7.0;  // Default to pH 7 if not provided
 
     if (calibratePH(known_value)) {
-      int raw_ph = analogRead(PH_PIN);
       // Apply calibration
-      float calibrated_ph = convertToPH(raw_ph);
+      float calibrated_ph = convertToPH();
       doc["ph"] = round(calibrated_ph * 100) / 100.0;
       return SUCCESS;
     } else {
