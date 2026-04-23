@@ -55,18 +55,25 @@
 #define ONE_WIRE_PIN 4
 #define TDS_PIN 35
 #define PH_PIN 33
+#define US_TRIG_PIN 12
+#define US_ECHO_PIN 14
+#define FLOW_SENSOR_PIN 27
 
 // ============================================================
 //  Calibration Constants
 // ============================================================
 #define CALIBRATION_SAMPLES 50    // Number of readings to average
 #define SAMPLE_DELAY 100          // Delay between samples (ms)
+#define ECHO_TIMEOUT 300000        // Timeout for echo pulse (microseconds)
+#define DELAY_FLOW_RATE 5000      // 5 second
 
 // Conversion factors (adjust based on your sensor specs)
 #define VREF 3.3                  // ESP32 ADC reference voltage
 #define ADC_RESOLUTION 4096.0     // 12-bit ADC
 #define PH_NEUTRAL_VOLTAGE 2.5    // Voltage at pH 7 (typical)
 #define PH_VOLTAGE_PER_UNIT 0.18  // mV per pH unit (typical)
+#define SOUND_SPEED 0.0343        // Speed of sound in air at 20°C = 343 m/s = 0.0343 cm/µs
+#define FLOW_CALIBRATION_FACTOR 450.0  // Pulses per liter (adjust based on your sensor)
 
 // ============================================================
 //  Define Objects
@@ -120,10 +127,10 @@ struct PHCalibration {
   bool is_calibrated = false;
 
   // For 1-point: use offset only
-  float offset = -147.00000077;
+  float offset = -161.0;
 
   // For 2-point: use linear (slope + offset)
-  float slope = -0.066666667;
+  float slope = 0.07;
 
   // Store three calibration points
   float point1_voltage = 2310.0;
@@ -151,14 +158,33 @@ TDSCalibration tds_cal;
 
 
 // ============================================================
+// Global Variables for Flow Rate Calculation
+// ============================================================
+uint32_t pulseCount = 0;                // Total pulses counted
+uint32_t lastPulseTime = 0;             // Timestamp of last pulse
+float flowRate = 0.0;                   // Current flow rate in L/min
+float totalVolume = 0.0;                // Total volume in liters
+unsigned long flowStartTime = 0;        // Start time for flow measurement
+
+// ============================================================
+// INTERRUPT SERVICE ROUTINE (ISR)
+// Called every time a pulse is detected
+// ============================================================
+void IRAM_ATTR flowSensorISR() {
+  pulseCount++;
+  lastPulseTime = millis();
+}
+
+
+// ============================================================
 //  Load calibration data from Preferences
 // ============================================================
 void loadCalibrationData() {
   preferences.begin("calibration", false);
 
   // Load pH calibration
-  ph_cal.slope = preferences.getFloat("ph_slope", -0.066666667);
-  ph_cal.offset = preferences.getFloat("ph_offset", -147.00000077);
+  ph_cal.slope = preferences.getFloat("ph_slope", -0.07);
+  ph_cal.offset = preferences.getFloat("ph_offset", 161.00);
   ph_cal.is_calibrated = preferences.getBool("ph_cal", false);
   ph_cal.num_points = preferences.getInt("ph_points", 0);
   ph_cal.point1_voltage = preferences.getFloat("ph_p1_v", 2310.0);
@@ -217,69 +243,6 @@ void saveCalibrationData() {
   preferences.end();
 
   Serial.println("💾 Calibration data saved to flash!");
-}
-
-
-// ============================================================
-//  Calculate 3-point quadratic calibration
-//  Solves system of equations for: pH = a*V^2 + b*V + c
-// ============================================================
-bool calculateThreePointCalibration(
-  float v1, float ph1,
-  float v2, float ph2,
-  float v3, float ph3,
-  float &a, float &b, float &c
-) {
-  Serial.println("\n   Calculating 3-point quadratic fit...");
-
-  // Check for duplicate points
-  if (abs(v1 - v2) < 0.001 || abs(v2 - v3) < 0.001 || abs(v1 - v3) < 0.001) {
-    Serial.println("   ⚠️ Error: Calibration points too close!");
-    return false;
-  }
-
-  // Using Lagrange interpolation formula for quadratic
-  // More numerically stable than solving matrix equations
-
-  float v1_sq = v1 * v1;
-  float v2_sq = v2 * v2;
-  float v3_sq = v3 * v3;
-
-  // Calculate determinants using Cramer's rule
-  float denom = (v1 - v2) * (v1 - v3) * (v2 - v3);
-
-  if (abs(denom) < 0.0001) {
-    Serial.println("   ⚠️ Error: Points are collinear!");
-    return false;
-  }
-
-  // Coefficient a (quadratic term)
-  a = (ph1 * (v2 - v3) + ph2 * (v3 - v1) + ph3 * (v1 - v2)) / denom;
-
-  // Coefficient b (linear term)
-  b = (ph1 * (v3_sq - v2_sq) + ph2 * (v1_sq - v3_sq) + ph3 * (v2_sq - v1_sq)) / denom;
-
-  // Coefficient c (constant term)
-  c = (ph1 * (v2 * v3_sq - v3 * v2_sq) +
-       ph2 * (v3 * v1_sq - v1 * v3_sq) +
-       ph3 * (v1 * v2_sq - v2 * v1_sq)) / denom;
-
-  Serial.printf("   a = %.6f (quadratic)\n", a);
-  Serial.printf("   b = %.6f (linear)\n", b);
-  Serial.printf("   c = %.6f (constant)\n", c);
-
-  // Verify the fit by checking all three points
-  float error1 = abs((a * v1_sq + b * v1 + c) - ph1);
-  float error2 = abs((a * v2_sq + b * v2 + c) - ph2);
-  float error3 = abs((a * v3_sq + b * v3 + c) - ph3);
-
-  Serial.printf("   Fit errors: %.4f, %.4f, %.4f pH\n", error1, error2, error3);
-
-  if (error1 > 0.01 || error2 > 0.01 || error3 > 0.01) {
-    Serial.println("   ⚠️ Warning: Large fitting errors detected!");
-  }
-
-  return true;
 }
 
 
@@ -407,7 +370,11 @@ float readVoltage() {
 float convertToPH() {
   // Convert ADC to voltage
   float voltage = readVoltage();
-  float ph_base = (voltage * ph_cal.slope) + ph_cal.offset;
+  float ph_base = (ph_cal.slope * voltage) + ph_cal.offset;
+  Serial.printf("Voltage = %.2f\n", voltage);
+  Serial.printf("slope = %.2f\n", ph_cal.slope);
+  Serial.printf("offset = %.2f\n", ph_cal.offset);
+  Serial.printf("ph_base = %.2f\n", ph_base);
   return ph_base;  // Return uncalibrated if not calibrated
 }
 
@@ -446,6 +413,71 @@ float convertToTDS(int raw_adc, float temperature) {
 }
 
 
+float readUltraSonicSensor() {
+  // Send 10µs pulse on trigger pin
+  digitalWrite(US_TRIG_PIN, LOW);
+  delayMicroseconds(2);  // Ensure LOW for at least 2µs
+
+  digitalWrite(US_TRIG_PIN, HIGH);
+  delayMicroseconds(10);  // HIGH for 10µs
+  digitalWrite(US_TRIG_PIN, LOW);
+
+  // Measure the duration of the echo pulse
+  // pulseIn() waits for pin to go HIGH, then measures how long it stays HIGH
+  unsigned long echoPulse = pulseIn(US_ECHO_PIN, HIGH, ECHO_TIMEOUT);
+
+  if (echoPulse == 0) {
+    Serial.println("Error: No echo received (timeout)");
+    return 0.0;
+  }
+
+  // Calculate distance using the echo pulse width
+  // Distance (cm) = (Echo_time_in_µs / 2) * speed_of_sound_in_cm/µs
+  // Divided by 2 because sound travels to object AND back
+  float distance = (echoPulse / 2.0) * SOUND_SPEED;
+  if (distance < 2.0 || distance > 450.0) {
+    Serial.printf("Warning: Distance out of range: %.2f cm\n", distance);
+    return 0.0;
+  }
+
+  return distance;
+}
+
+float readUltraSonicSensorAverage() {
+  float distanceSum = 0;
+  uint8_t count = 0;
+
+  float tmp = 0.0;
+  for (uint8_t i=1;i<=10;i++) {
+    tmp = readUltraSonicSensor();
+    if (tmp != 0.0) {
+      distanceSum += tmp;
+      count++;
+    }
+  }
+
+  if (count > 0) {
+    return (distanceSum / (float)count);
+  } else {
+    Serial.println("❌ No valid ultrasonic readings!");
+    return 0.0;  // Return 0 instead of dividing by zero
+  }
+}
+
+float readLightIntensity() {
+  // Try to read from BH1750
+  uint16_t lux = luxmeter.readLightLevel();
+
+  // BH1750 returns 65535 on error or if not configured
+  if (lux == 65535 || lux == 0) {
+    Serial.println("⚠️ BH1750 reading error - check sensor connection");
+    return -1.0;  // Return -1 to indicate error
+  }
+
+  return (float)lux;
+}
+
+
 // ============================================================
 //  ★ IMPROVED pH CALIBRATION ★
 //  Supports both one-point and two-point calibration
@@ -467,7 +499,7 @@ bool calibratePH(float known_ph_value) {
   Serial.printf("   Base pH (uncalibrated): %.2f\n", base_ph);
 
   // Determine if this is first or second calibration point
-  if (ph_cal.num_points == 0) {
+  if (ph_cal.num_points == 0 || known_ph_value == 4.0) {
     // First calibration point
     Serial.println("   → Setting as calibration point 1");
 
@@ -497,16 +529,7 @@ bool calibratePH(float known_ph_value) {
 
   } else {
     // First calibration point
-    Serial.println("   → Setting as calibration point 1");
-
-    ph_cal.point1_voltage = voltage;
-    ph_cal.point1_ph = known_ph_value;
-    ph_cal.num_points = 1;
-
-    ph_cal.is_calibrated = true;
-
-    Serial.printf("   One-point calibration applied\n");
-    Serial.printf("   Offset: %.3f\n", ph_cal.offset);
+    return false;
   }
 
   // Calculate two-point calibration
@@ -595,6 +618,45 @@ bool calibrateTDS(float known_tds_value) {
 
 
 // ============================================================
+// Read Current Flow Rate (L/min)
+// ============================================================
+float readFlowRate() {
+  // Read current pulse count
+  uint32_t currentPulses = pulseCount;
+
+  // Calculate volume from pulses
+  float volume = currentPulses / FLOW_CALIBRATION_FACTOR;
+
+  // Calculate time elapsed in minutes
+  unsigned long elapsedTime = millis() - flowStartTime;
+  float elapsedMinutes = elapsedTime / 60000.0;  // Convert milliseconds to minutes
+
+  // Avoid division by zero
+  if (elapsedMinutes < 0.001) {
+    return 0.0;
+  }
+
+  // Flow rate = Volume / Time
+  flowRate = volume / elapsedMinutes;
+
+  return flowRate;
+}
+
+
+// ============================================================
+// Reset Flow Measurement
+// Call this to start a new flow measurement
+// ============================================================
+void resetFlowMeasurement() {
+  pulseCount = 0;
+  totalVolume = 0.0;
+  flowRate = 0.0;
+  flowStartTime = millis();
+  lastPulseTime = millis();
+}
+
+
+// ============================================================
 //  Reset calibration to factory defaults
 // ============================================================
 bool resetCalibration(const char* sensor_type) {
@@ -603,15 +665,14 @@ bool resetCalibration(const char* sensor_type) {
   preferences.begin("calibration", false);
 
   if (strcmp(sensor_type, "PH") == 0 || strcmp(sensor_type, "ALL") == 0) {
-    ph_cal.slope = -0.066666667;
-    ph_cal.offset = -147.00000077;
-    ph_cal.is_calibrated = false;
-    ph_cal.num_points = 0;
-
-    preferences.putFloat("ph_slope", -0.066666667);
-    preferences.putFloat("ph_offset", -147.00000077);
+    preferences.putFloat("ph_slope", 0.07);
+    preferences.putFloat("ph_offset", -161.0);
     preferences.putBool("ph_cal", false);
     preferences.putInt("ph_points", 0);
+    preferences.putFloat("ph_p1_v", 2310.0);
+    preferences.putFloat("ph_p1_ph", 7.0);
+    preferences.putFloat("ph_p2_v", 2355.0);
+    preferences.putFloat("ph_p2_ph", 4.0);
 
     Serial.println("   ✅ pH calibration reset");
   }
@@ -650,6 +711,10 @@ void printCalibrationStatus() {
   Serial.printf("  Points: %d\n", ph_cal.num_points);
   Serial.printf("  Slope: %.4f\n", ph_cal.slope);
   Serial.printf("  Offset: %.3f\n", ph_cal.offset);
+  Serial.printf("  point1_ph: %.3f\n", ph_cal.point1_ph);
+  Serial.printf("  point2_ph: %.3f\n", ph_cal.point2_ph);
+  Serial.printf("  point1_voltage: %.3f\n", ph_cal.point1_voltage);
+  Serial.printf("  point2_voltage: %.3f\n", ph_cal.point2_voltage);
   if (ph_cal.num_points >= 1) {
     Serial.printf("  Point 1: pH %.2f @ %.3fV\n", ph_cal.point1_ph, ph_cal.point1_voltage);
   }
@@ -687,10 +752,15 @@ void generateData(JsonObject doc) {
   float calibrated_ph = convertToPH();
   float calibrated_tds = convertToTDS(raw_tds, temperature);
 
+  resetFlowMeasurement();
+  delay(DELAY_FLOW_RATE);
+
   doc["ph"] = round(calibrated_ph * 100) / 100.0;  // Round to 2 decimals
   doc["ec"] = round(calibrated_tds * 100) / 100.0;
   doc["water_temp"] = round(temperature * 10) / 10.0;
-  doc["light_intensity"] = luxmeter.readLightLevel();
+  doc["light_intensity"] = readLightIntensity();
+  doc["water_level"] = readUltraSonicSensorAverage();
+  doc["flow_rate"] = round(readFlowRate() * 100) / 100.0;
 }
 
 // ============================================================
@@ -910,14 +980,38 @@ void setup() {
   Serial.println("╚══════════════════════════════════════╝");
 
   // Load calibration data from Preferences
-  loadCalibrationData();
 
   // Begin sensors
   Wire.begin(SDA_PIN, SCL_PIN);
-  luxmeter.begin();
+  if (luxmeter.begin()) {
+    Serial.println("✅ BH1750 initialized successfully!");
+    // Set mode for continuous measurement
+    luxmeter.configure(BH1750::CONTINUOUS_HIGH_RES_MODE);
+  } else {
+    Serial.println("❌ BH1750 initialization failed! Check I2C connection.");
+    Serial.println("   - Verify SDA (GPIO 21) and SCL (GPIO 22) connections");
+    Serial.println("   - Check if BH1750 address is 0x23 or 0x5C");
+  }
+
   watertemp.begin();
   pinMode(PH_PIN, INPUT);
   pinMode(TDS_PIN, INPUT);
+
+  pinMode(US_TRIG_PIN, OUTPUT);
+  pinMode(US_ECHO_PIN, INPUT);
+  digitalWrite(US_TRIG_PIN, LOW);
+
+  loadCalibrationData();
+  printCalibrationStatus();
+
+  pinMode(FLOW_SENSOR_PIN, INPUT);
+  attachInterrupt(digitalPinToInterrupt(FLOW_SENSOR_PIN), flowSensorISR, RISING);
+  // Initialize variables
+  pulseCount = 0;
+  lastPulseTime = 0;
+  flowRate = 0.0;
+  totalVolume = 0.0;
+  flowStartTime = millis();
 
   // Connect
   mqtt.setServer(MQTT_SERVER, MQTT_PORT);
