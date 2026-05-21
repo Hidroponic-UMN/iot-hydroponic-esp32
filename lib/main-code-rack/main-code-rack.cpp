@@ -104,6 +104,8 @@ char signin_ack[32];
 // Calibration offsets (loaded from Preferences)
 float ph_offset = 0.0;
 float tds_offset = 0.0;
+float us_slope = 1.0;     // Manual calibration slope for Ultrasonic
+float us_offset = 0.0;    // Manual calibration offset for Ultrasonic
 
 // Command definitions
 const char * cmd_PH_CALIBRATION = "KALIBRASI_PH";
@@ -434,11 +436,14 @@ float readUltraSonicSensor() {
   // Calculate distance using the echo pulse width
   // Distance (cm) = (Echo_time_in_µs / 2) * speed_of_sound_in_cm/µs
   // Divided by 2 because sound travels to object AND back
-  float distance = (echoPulse / 2.0) * SOUND_SPEED;
-  if (distance < 2.0 || distance > 450.0) {
-    Serial.printf("Warning: Distance out of range: %.2f cm\n", distance);
+  float raw_distance = (echoPulse / 2.0) * SOUND_SPEED;
+  if (raw_distance < 2.0 || raw_distance > 450.0) {
+    Serial.printf("Warning: Distance out of range: %.2f cm\n", raw_distance);
     return 0.0;
   }
+
+  // Apply manual two-point calibration
+  float distance = (raw_distance * us_slope) + us_offset;
 
   return distance;
 }
@@ -464,17 +469,44 @@ float readUltraSonicSensorAverage() {
   }
 }
 
+// ============================================================
+//  ★ MANUAL ULTRASONIC CALIBRATION ★
+//  Adjusts slope and offset based on two manual data points
+// ============================================================
+void calibrateUltrasonicSensor() {
+  Serial.println("\n📏 Calibrating Ultrasonic Sensor (Two-Point)...");
+
+  // Dummy data pairs for calibration (raw_distance, actual_distance)
+  // Point 1
+  float raw_d1 = 10.0;    // Replace with raw distance reading 1
+  float actual_d1 = 10.5; // Replace with actual physical distance 1
+
+  // Point 2
+  float raw_d2 = 50.0;    // Replace with raw distance reading 2
+  float actual_d2 = 51.2; // Replace with actual physical distance 2
+
+  calculateTwoPointCalibration(
+    raw_d1, actual_d1,
+    raw_d2, actual_d2,
+    us_slope, us_offset
+  );
+
+  Serial.printf("✅ Ultrasonic Calibration Updated:\n");
+  Serial.printf("   Slope = %.4f\n", us_slope);
+  Serial.printf("   Offset = %.4f\n\n", us_offset);
+}
+
 float readLightIntensity() {
   // Try to read from BH1750
-  uint16_t lux = luxmeter.readLightLevel();
+  float lux = luxmeter.readLightLevel();
 
-  // BH1750 returns 65535 on error or if not configured
-  if (lux == 65535 || lux == 0) {
+  // BH1750 returns 65535 or < 0 on error or if not configured
+  if (lux == 65535.0 || lux < 0.0) {
     Serial.println("⚠️ BH1750 reading error - check sensor connection");
     return -1.0;  // Return -1 to indicate error
   }
 
-  return (float)lux;
+  return lux;
 }
 
 
