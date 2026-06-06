@@ -36,10 +36,10 @@
 #define RACK_ID         1
 #define DESC_DEVICE     "Buat Rack Hydroponic"
 
-#define WIFI_SSID       "seedlab"
-#define WIFI_PASSWORD   "davidbun"
+#define WIFI_SSID       "FUNHOUSE 1B"
+#define WIFI_PASSWORD   "T554022v23"
 
-#define MQTT_SERVER     "10.229.237.57"
+#define MQTT_SERVER     "192.168.3.116"
 #define MQTT_PORT       1883
 #define MQTT_USER       "esp32-1"
 #define MQTT_PASSWORD   "rack1"
@@ -55,7 +55,7 @@
 #define ONE_WIRE_PIN 4
 #define TDS_PIN 35
 #define PH_PIN 33
-#define US_TRIG_PIN 12
+#define US_TRIG_PIN 13
 #define US_ECHO_PIN 14
 #define FLOW_SENSOR_PIN 27
 
@@ -418,7 +418,7 @@ float convertToTDS(int raw_adc, float temperature) {
 float readUltraSonicSensor() {
   // Send 10µs pulse on trigger pin
   digitalWrite(US_TRIG_PIN, LOW);
-  delayMicroseconds(2);  // Ensure LOW for at least 2µs
+  delayMicroseconds(4);  // Ensure LOW for at least 2µs
 
   digitalWrite(US_TRIG_PIN, HIGH);
   delayMicroseconds(10);  // HIGH for 10µs
@@ -455,6 +455,7 @@ float readUltraSonicSensorAverage() {
   float tmp = 0.0;
   for (uint8_t i=1;i<=10;i++) {
     tmp = readUltraSonicSensor();
+    delay(60);
     if (tmp != 0.0) {
       distanceSum += tmp;
       count++;
