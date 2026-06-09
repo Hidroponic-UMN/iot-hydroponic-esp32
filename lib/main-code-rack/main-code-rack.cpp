@@ -64,7 +64,7 @@
 // ============================================================
 #define CALIBRATION_SAMPLES 50    // Number of readings to average
 #define SAMPLE_DELAY 100          // Delay between samples (ms)
-#define ECHO_TIMEOUT 300000        // Timeout for echo pulse (microseconds)
+#define ECHO_TIMEOUT 30000        // Timeout for echo pulse (microseconds)
 #define DELAY_FLOW_RATE 5000      // 5 second
 
 // Conversion factors (adjust based on your sensor specs)
@@ -436,6 +436,8 @@ float convertToTDS(int raw_adc, float temperature) {
 float readFlowRate() {
   // Read current pulse count
   uint32_t currentPulses = pulseCount;
+  Serial.print("Pulse Count: ");
+  Serial.println(pulseCount);
 
   // Calculate volume from pulses
   float volume = currentPulses / FLOW_CALIBRATION_FACTOR;
@@ -488,15 +490,12 @@ float readUltraSonicSensor() {
   // Calculate distance using the echo pulse width
   // Distance (cm) = (Echo_time_in_µs / 2) * speed_of_sound_in_cm/µs
   // Divided by 2 because sound travels to object AND back
-  float raw_distance = (echoPulse / 2.0) * SOUND_SPEED;
-  if (raw_distance < 2.0 || raw_distance > 450.0) {
-    Serial.printf("Warning: Distance out of range: %.2f cm\n", raw_distance);
+  float distance_in_cm = (echoPulse / 2.0) * SOUND_SPEED;
+  if (distance_in_cm < 2.0 || distance_in_cm > 450.0) {
+    Serial.printf("Warning: Distance out of range: %.2f cm\n", distance_in_cm);
     return 0.0;
   }
-
-  // Apply manual two-point calibration
-  float distance = (raw_distance * us_cal.slope) + us_cal.offset;
-  return distance;
+  return distance_in_cm;
 }
 
 float readUltraSonicSensorAverage() {
@@ -505,8 +504,8 @@ float readUltraSonicSensorAverage() {
 
   float tmp = 0.0;
   for (uint8_t i=1;i<=10;i++) {
-    tmp = readUltraSonicSensor();
     delay(60);
+    tmp = readUltraSonicSensor();
     if (tmp != 0.0) {
       distanceSum += tmp;
       count++;
@@ -514,7 +513,11 @@ float readUltraSonicSensorAverage() {
   }
 
   if (count > 0) {
-    return (distanceSum / (float)count);
+    distanceSum = (distanceSum / (float)count);
+    Serial.print("Distance in average: ");
+    Serial.println(distanceSum);
+    float distanceInCM = (distanceSum * us_cal.slope) + us_cal.offset;
+    return distanceInCM;
   } else {
     Serial.println("❌ No valid ultrasonic readings!");
     return 0.0;  // Return 0 instead of dividing by zero
@@ -645,13 +648,13 @@ bool calibrateTDS(float known_tds_value) {
 //  ★ IMPROVED ULTRASONIC CALIBRATION ★
 //  Supports both one-point and two-point calibration
 // ============================================================
-bool calibrateUS(float known_us_value) {
+bool calibrateUS(float known_us_value, float base_value_us) {
   Serial.println("\n🧪 Starting US Calibration...");
   Serial.printf("   Target US: %.2f\n", known_us_value);
   Serial.printf("   Current calibration points: %d\n", us_cal.num_points);
   Serial.println("   Taking readings...");
 
-  float base_us = readUltraSonicSensorAverage();
+  float base_us = base_value_us;
   Serial.printf("   Base US (uncalibrated): %.2f cm\n", base_us);
 
   if (us_cal.num_points == 0) {
@@ -662,11 +665,6 @@ bool calibrateUS(float known_us_value) {
     Serial.printf("   One-point calibration applied\n");
   } else if (us_cal.num_points == 1) {
     Serial.println("   → Setting as calibration point 2");
-
-    if (abs(known_us_value - us_cal.point1_us) < 1.0) {
-      Serial.println("⚠️ Warning: Calibration points should be at least 1cm unit apart!");
-    }
-
     us_cal.point2_voltage = base_us;
     us_cal.point2_us = known_us_value;
     us_cal.num_points = 2;
@@ -1030,7 +1028,14 @@ void setup() {
   Serial.printf( "║  Topic:   %s      ║\n", mqtt_topic);
   Serial.println("╚══════════════════════════════════════╝");
 
-  // Load calibration data from Preferences
+
+  // UltraSonic first calibration
+  // calibrateUS(1.5, 23.93);
+  //UltraSonic second calibration
+  // calibrateUS(20.0, 20.46);
+
+  loadCalibrationData();
+  // printCalibrationStatus();
 
   // Begin sensors
   Wire.begin(SDA_PIN, SCL_PIN);
@@ -1052,9 +1057,6 @@ void setup() {
   pinMode(US_ECHO_PIN, INPUT);
   digitalWrite(US_TRIG_PIN, LOW);
 
-  loadCalibrationData();
-  printCalibrationStatus();
-
   pinMode(FLOW_SENSOR_PIN, INPUT);
   attachInterrupt(digitalPinToInterrupt(FLOW_SENSOR_PIN), flowSensorISR, RISING);
   // Initialize variables
@@ -1065,10 +1067,10 @@ void setup() {
   flowStartTime = millis();
 
   // Connect
-  mqtt.setServer(MQTT_SERVER, MQTT_PORT);
-  mqtt.setCallback(callBack);
-  connectWiFi();
-  connectMQTT();
+  // mqtt.setServer(MQTT_SERVER, MQTT_PORT);
+  // mqtt.setCallback(callBack);
+  // connectWiFi();
+  // connectMQTT();
 }
 
 // ============================================================
@@ -1076,12 +1078,12 @@ void setup() {
 // ============================================================
 void loop() {
   // Ensure connections
-  connectWiFi();
-  if (!mqtt.connected()) connectMQTT();
-  mqtt.loop();
+  // connectWiFi();
+  // if (!mqtt.connected()) connectMQTT();
+  // mqtt.loop();
 
-  if (!isRegistered) {
-    registerDevice();
+  if (!!isRegistered) {
+    // registerDevice();
   } else {
     // Send data at interval
     if (millis() - lastSend >= SEND_INTERVAL) {

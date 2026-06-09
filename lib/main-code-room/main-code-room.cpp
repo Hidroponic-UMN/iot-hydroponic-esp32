@@ -40,19 +40,19 @@
 #define RACK_ID         0
 #define DESC_DEVICE     "Device untuk ukur temp dan humidity"
 
-#define WIFI_SSID       "Real"      // Ubah: nama WiFi
-#define WIFI_PASSWORD   "aqm3xppp"         // Ubah: password WiFi
+#define WIFI_SSID       "ACES"      // Ubah: nama WiFi
+#define WIFI_PASSWORD   "bukanuntukifdansi"         // Ubah: password WiFi
 
-#define MQTT_SERVER     "10.34.184.30"       // Ubah: IP server Docker
+#define MQTT_SERVER     "172.27.7.189"       // Ubah: IP server Docker
 #define MQTT_PORT       1883
 #define MQTT_USER       "esp32-0"
 #define MQTT_PASSWORD   "room0"
 
-#define DHT_PIN         4                     // Pin data DHT22
+#define DHT_PIN         D4                     // Pin data DHT22
 #define DHT_TYPE        DHT22
 #define SEND_INTERVAL   5000                  // Kirim setiap 5 detik
-
 // ============================================================
+
 //  Internal — jangan diubah
 // ============================================================
 WiFiClient espClient;
@@ -182,7 +182,7 @@ void callBack(char* topic, byte* payload, unsigned int length) {
 // ============================================================
 void setup() {
   Serial.begin(115200);
-  delay(1000);
+  delay(5000);
 
   Serial.println("\n╔══════════════════════════════════════╗");
   Serial.println("║  🏠 Room Sensor — Wemos + DHT22       ║");
@@ -216,4 +216,13 @@ void loop() {
       publishRoomData();
     }
   }
+
+  // TESTING
+  // float temp = dht.readTemperature();
+  // float hum  = dht.readHumidity();
+  // Serial.print("Temp: ");
+  // Serial.println(temp);
+  // Serial.print("Hum: ");
+  // Serial.println(hum);
+  // delay(1000);
 }
