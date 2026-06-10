@@ -36,10 +36,10 @@
 #define RACK_ID         3
 #define DESC_DEVICE     "Buat Rack Hydroponic ke-3"
 
-#define WIFI_SSID       "IoT UMN"
-#define WIFI_PASSWORD   "umniot2022"
+#define WIFI_SSID       "Seed"
+#define WIFI_PASSWORD   "seedseed"
 
-#define MQTT_SERVER     "192.168.74.10"
+#define MQTT_SERVER     "10.213.121.73"
 #define MQTT_PORT       1883
 #define MQTT_USER       "esp32-3"
 #define MQTT_PASSWORD   "rack3"
@@ -821,7 +821,7 @@ void connectWiFi() {
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+  while (WiFi.status() != WL_CONNECTED && attempts < 5) {
     delay(500);
     Serial.print(".");
     attempts++;
@@ -830,8 +830,8 @@ void connectWiFi() {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.printf("\n✅ WiFi connected! IP: %s\n", WiFi.localIP().toString().c_str());
   } else {
-    Serial.println("\n❌ WiFi connection failed! Retrying in 5s...");
-    delay(5000);
+    Serial.println("\n❌ WiFi connection failed! Retrying ...");
+    delay(50);
   }
 }
 
@@ -843,7 +843,8 @@ void connectMQTT() {
 
   Serial.printf("🔌 Connecting to MQTT: %s:%d...\n", MQTT_SERVER, MQTT_PORT);
 
-  while (!mqtt.connected()) {
+  int attempt = 0;
+  while (!mqtt.connected() && attempt < 5) {
     if (mqtt.connect(client_id, MQTT_USER, MQTT_PASSWORD)) {
       Serial.printf("✅ MQTT connected as '%s'\n", client_id);
       Serial.printf("📤 Publishing to topic: %s\n", mqtt_topic);
@@ -851,9 +852,11 @@ void connectMQTT() {
       mqtt.subscribe(cmd_Topic);
       mqtt.subscribe(signin_ack);
       Serial.printf("📥 Subscribing to topic: %s\n\n", cmd_Topic);
+      delay(60);
     } else {
       Serial.printf("❌ MQTT failed (rc=%d). Retrying in 3s...\n", mqtt.state());
-      delay(3000);
+      attempt++;
+      delay(60);
     }
   }
 }
@@ -1063,6 +1066,7 @@ void setup() {
   // Connect
   mqtt.setServer(MQTT_SERVER, MQTT_PORT);
   mqtt.setCallback(callBack);
+  mqtt.setBufferSize(512); // <--- INCREASE BUFFER SIZE
   connectWiFi();
   connectMQTT();
 }
@@ -1073,7 +1077,7 @@ void setup() {
 void loop() {
   // Ensure connections
   connectWiFi();
-  if (!mqtt.connected()) connectMQTT();
+  connectMQTT();
   mqtt.loop();
 
   if (!isRegistered) {
@@ -1081,16 +1085,15 @@ void loop() {
   } else {
     // Send data at interval
     if (millis() - lastSend >= SEND_INTERVAL) {
-      lastSend = millis();
 
       // Build JSON payload
-      StaticJsonDocument<256> root;
+      StaticJsonDocument<512> root;
       root["mac_addr"] = mac_addr;
       JsonObject data = root["data"].to<JsonObject>();
       generateData(data);
 
-      char payload[300];
-      serializeJsonPretty(root, payload);
+      char payload[512];
+      serializeJson(root, payload);
       Serial.println("JSON Payload:");
       Serial.println(payload);
       Serial.println();
@@ -1101,6 +1104,9 @@ void loop() {
       } else {
         Serial.println("❌ Publish failed!");
       }
+
+      // Update lastSend AFTER generateData to avoid loop starvation
+      lastSend = millis();
     }
   }
 }
