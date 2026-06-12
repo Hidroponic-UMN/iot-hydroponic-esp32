@@ -24,9 +24,11 @@
 #if defined(ESP8266)
   #include <ESP8266WiFi.h>
   #include <ESP8266HTTPClient.h>
+  #define DHT_PIN         D4                     // Pin data DHT22
 #elif defined(ESP32)
   #include <WiFi.h>
   #include <HTTPClient.h>
+  #define DHT_PIN         32                     // Pin data DHT22
 #endif
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
@@ -48,7 +50,6 @@
 #define MQTT_USER       "esp32-0"
 #define MQTT_PASSWORD   "room0"
 
-#define DHT_PIN         D4                     // Pin data DHT22
 #define DHT_TYPE        DHT22
 #define SEND_INTERVAL   1000 * 60 * 10                  // in millisecond
 // ============================================================
@@ -196,34 +197,34 @@ void setup() {
   snprintf(signin_ack, sizeof(signin_ack), "device/%d/register/ack", RACK_ID);
 
   dht.begin();
-  mqtt.setServer(MQTT_SERVER, MQTT_PORT);
-  mqtt.setCallback(callBack);
-  connectWiFi();
-  connectMQTT();
+  // mqtt.setServer(MQTT_SERVER, MQTT_PORT);
+  // mqtt.setCallback(callBack);
+  // connectWiFi();
+  // connectMQTT();
 }
 
 // ============================================================
 //  Loop
 // ============================================================
 void loop() {
-  connectWiFi();
-  connectMQTT();
-  mqtt.loop();
-  if (!isRegistered) {
-    registerDevice();
-  } else {
-    if (millis() - lastSend >= SEND_INTERVAL) {
-      lastSend = millis();
-      publishRoomData();
-    }
-  }
+  // connectWiFi();
+  // connectMQTT();
+  // mqtt.loop();
+  // if (!isRegistered) {
+  //   registerDevice();
+  // } else {
+  //   if (millis() - lastSend >= SEND_INTERVAL) {
+  //     lastSend = millis();
+  //     publishRoomData();
+  //   }
+  // }
 
   // TESTING
-  // float temp = dht.readTemperature();
-  // float hum  = dht.readHumidity();
-  // Serial.print("Temp: ");
-  // Serial.println(temp);
-  // Serial.print("Hum: ");
-  // Serial.println(hum);
-  // delay(1000);
+  float temp = dht.readTemperature();
+  float hum  = dht.readHumidity();
+  Serial.print("Temp: ");
+  Serial.println(temp);
+  Serial.print("Hum: ");
+  Serial.println(hum);
+  delay(2000);
 }
