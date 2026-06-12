@@ -33,18 +33,18 @@
 // ============================================================
 
 #define TYPE_ID         "HYDROPONIC_RACKS"
-#define RACK_ID         3
-#define DESC_DEVICE     "Buat Rack Hydroponic ke-3"
+#define RACK_ID         2
+#define DESC_DEVICE     "Buat Rack Hydroponic ke-2"
 
-#define WIFI_SSID       "Seed"
-#define WIFI_PASSWORD   "seedseed"
+#define WIFI_SSID       "IoT UMN"
+#define WIFI_PASSWORD   "umniot2022"
 
-#define MQTT_SERVER     "10.213.121.73"
+#define MQTT_SERVER     "192.168.74.57"
 #define MQTT_PORT       1883
-#define MQTT_USER       "esp32-3"
-#define MQTT_PASSWORD   "rack3"
+#define MQTT_USER       "esp32-2"
+#define MQTT_PASSWORD   "rack2"
 
-#define SEND_INTERVAL   5000 // in second, 5 second
+#define SEND_INTERVAL   1000 * 60 * 10 // in millisecond
 #define TIME_OUT_INTERVAL   60000
 
 // ============================================================
@@ -88,12 +88,13 @@ Preferences preferences;  // ★ Preferences object for storage
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
 
-String mac_addr = "f4c1e01b-46e7-42c5-9f69-05d67a5a6a5b-3";
+String mac_addr = "f4c1e01b-46e7-42c5-9f69-05d67a5a6a5b-2";
 bool isRegistered = false;
 char mqtt_topic[32];
 char client_id[32];
 unsigned long lastSend = 0;
 unsigned long timeOut = 0;
+unsigned long readingTime = 0;
 
 char cmd_Topic[32];
 char ack_cmd_Topic[48];
@@ -427,6 +428,8 @@ float averageTDSVoltage() {
 
 float convertToTDS() {
   float compensationVoltage = averageTDSVoltage();
+  Serial.print("TDS Voltage: ");
+  Serial.println(compensationVoltage);
   float tds_base = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage
                       - 255.86 * compensationVoltage * compensationVoltage
                       + 857.39 * compensationVoltage) * 0.5;
@@ -613,18 +616,20 @@ bool calibrateTDS(float known_tds_value) {
   Serial.printf("   Target TDS: %.2f ppm\n", known_tds_value);
   Serial.printf("   Current calibration points: %d\n", tds_cal.num_points);
   Serial.println("   Taking readings...");
+  delay(1000);
+  float compensationVoltage = averageTDSVoltage();
+  float base_tds = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage
+                      - 255.86 * compensationVoltage * compensationVoltage
+                      + 857.39 * compensationVoltage) * 0.5;
 
-  float voltage = averageTDSVoltage();
-  float base_tds = convertToTDS();
-
-  Serial.printf("   Voltage: %.3f V\n", voltage);
+  Serial.printf("   Voltage: %.3f V\n", compensationVoltage);
   Serial.printf("   Base TDS (uncalibrated): %.2f ppm\n", base_tds);
 
   if (tds_cal.num_points == 0 || tds_cal.num_points == 1 ) {
     // First calibration point
     Serial.println("   → Setting as calibration point 1");
 
-    tds_cal.point1_voltage = voltage;
+    tds_cal.point1_voltage = compensationVoltage;
     tds_cal.point1_tds = known_tds_value;
     tds_cal.num_points = 1;
 
@@ -1025,25 +1030,17 @@ void setup() {
   Serial.printf( "║  Topic:   %s      ║\n", mqtt_topic);
   Serial.println("╚══════════════════════════════════════╝");
 
-
-  // UltraSonic first calibration
-  // calibrateUS(1.5, 23.93);
-  //UltraSonic second calibration
-  // calibrateUS(20.0, 20.46);
-
-  printCalibrationStatus();
   loadCalibrationData();
+  printCalibrationStatus();
+  // resetCalibration("TDS");
 
   // Begin sensors
   Wire.begin(SDA_PIN, SCL_PIN);
   if (luxmeter.begin()) {
     Serial.println("✅ BH1750 initialized successfully!");
-    // Set mode for continuous measurement
     luxmeter.configure(BH1750::CONTINUOUS_HIGH_RES_MODE);
   } else {
     Serial.println("❌ BH1750 initialization failed! Check I2C connection.");
-    Serial.println("   - Verify SDA (GPIO 21) and SCL (GPIO 22) connections");
-    Serial.println("   - Check if BH1750 address is 0x23 or 0x5C");
   }
 
   watertemp.begin();
@@ -1084,9 +1081,9 @@ void loop() {
     registerDevice();
   } else {
     // Send data at interval
-    if (millis() - lastSend >= SEND_INTERVAL) {
+    if (millis() - lastSend >= SEND_INTERVAL - readingTime) {
+      unsigned long startReadingTime = millis();
 
-      // Build JSON payload
       StaticJsonDocument<512> root;
       root["mac_addr"] = mac_addr;
       JsonObject data = root["data"].to<JsonObject>();
@@ -1105,8 +1102,8 @@ void loop() {
         Serial.println("❌ Publish failed!");
       }
 
-      // Update lastSend AFTER generateData to avoid loop starvation
       lastSend = millis();
+      readingTime = millis() - startReadingTime;
     }
   }
 }

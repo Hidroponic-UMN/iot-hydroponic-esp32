@@ -40,17 +40,17 @@
 #define RACK_ID         0
 #define DESC_DEVICE     "Device untuk ukur temp dan humidity"
 
-#define WIFI_SSID       "ACES"      // Ubah: nama WiFi
-#define WIFI_PASSWORD   "bukanuntukifdansi"         // Ubah: password WiFi
+#define WIFI_SSID       "IoT UMN"      // Ubah: nama WiFi
+#define WIFI_PASSWORD   "umniot2022"         // Ubah: password WiFi
 
-#define MQTT_SERVER     "172.27.7.189"       // Ubah: IP server Docker
+#define MQTT_SERVER     "192.168.74.57"       // Ubah: IP server Docker
 #define MQTT_PORT       1883
 #define MQTT_USER       "esp32-0"
 #define MQTT_PASSWORD   "room0"
 
 #define DHT_PIN         D4                     // Pin data DHT22
 #define DHT_TYPE        DHT22
-#define SEND_INTERVAL   5000                  // Kirim setiap 5 detik
+#define SEND_INTERVAL   1000 * 60 * 10                  // in millisecond
 // ============================================================
 
 //  Internal — jangan diubah
@@ -78,7 +78,7 @@ void connectWiFi() {
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+  while (WiFi.status() != WL_CONNECTED && attempts < 5) {
     delay(500);
     Serial.print(".");
     attempts++;
@@ -89,7 +89,6 @@ void connectWiFi() {
   } else {
     Serial.println("\n❌ WiFi failed! Restarting...");
     delay(3000);
-    ESP.restart();
   }
 }
 
@@ -101,14 +100,16 @@ void connectMQTT() {
 
   Serial.printf("🔌 Connecting to MQTT: %s:%d...\n", MQTT_SERVER, MQTT_PORT);
 
-  while (!mqtt.connected()) {
+  int attempt = 0;
+  while (!mqtt.connected() && attempt < 5) {
     if (mqtt.connect(client_id, MQTT_USER, MQTT_PASSWORD)) {
       mqtt.subscribe(signin_ack);
       Serial.println("✅ MQTT connected!");
       Serial.printf("📤 Publishing to: %s\n", mqtt_topic);
     } else {
       Serial.printf("❌ MQTT failed (rc=%d). Retry in 3s...\n", mqtt.state());
-      delay(3000);
+      attempt++;
+      delay(500);
     }
   }
 }
@@ -206,7 +207,7 @@ void setup() {
 // ============================================================
 void loop() {
   connectWiFi();
-  if (!mqtt.connected()) connectMQTT();
+  connectMQTT();
   mqtt.loop();
   if (!isRegistered) {
     registerDevice();
