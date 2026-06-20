@@ -33,18 +33,18 @@
 // ============================================================
 
 #define TYPE_ID         "HYDROPONIC_RACKS"
-#define RACK_ID         2
-#define DESC_DEVICE     "Buat Rack Hydroponic ke-2"
+#define RACK_ID         3
+#define DESC_DEVICE     "Buat Rack Hydroponic ke-3"
 
 #define WIFI_SSID       "IoT UMN"
 #define WIFI_PASSWORD   "umniot2022"
 
 #define MQTT_SERVER     "192.168.74.57"
 #define MQTT_PORT       1883
-#define MQTT_USER       "esp32-2"
-#define MQTT_PASSWORD   "rack2"
+#define MQTT_USER       "esp32-3"
+#define MQTT_PASSWORD   "rack3"
 
-#define SEND_INTERVAL   1000 * 60 * 10 // in millisecond
+#define SEND_INTERVAL   10000 // in millisecond
 #define TIME_OUT_INTERVAL   60000
 
 // ============================================================
@@ -88,7 +88,7 @@ Preferences preferences;  // ★ Preferences object for storage
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
 
-String mac_addr = "f4c1e01b-46e7-42c5-9f69-05d67a5a6a5b-2";
+String mac_addr = "f4c1e01b-46e7-42c5-9f69-05d67a5a6a5b-3";
 bool isRegistered = false;
 char mqtt_topic[32];
 char client_id[32];
@@ -356,35 +356,6 @@ float readADCFilterVoltage(int pin) {
     // 5. Convert to voltage (mV)
     float voltage = avgValue * (3300.0 / 4095.0);
 
-    // // 6. Apply Exponential Moving Average (EMA) filter
-    // if (!ema_initialized) {
-    //     ema_voltage = voltage;
-    //     ema_initialized = true;
-    // } else {
-    //     ema_voltage = (ALPHA * voltage) + ((1.0 - ALPHA) * ema_voltage);
-    // }
-
-    // // 7. Optional: Apply median filter on final result
-    // static float voltage_history[5] = {0};
-    // static int history_index = 0;
-
-    // voltage_history[history_index] = ema_voltage;
-    // history_index = (history_index + 1) % 5;
-
-    // // Sort history for median
-    // float sorted_history[5];
-    // memcpy(sorted_history, voltage_history, sizeof(voltage_history));
-    // for (int i = 0; i < 4; i++) {
-    //     for (int j = i + 1; j < 5; j++) {
-    //         if (sorted_history[i] > sorted_history[j]) {
-    //             float temp = sorted_history[i];
-    //             sorted_history[i] = sorted_history[j];
-    //             sorted_history[j] = temp;
-    //         }
-    //     }
-    // }
-
-    // Return median value (middle of 5 samples)
     return voltage;
 }
 
@@ -523,7 +494,7 @@ float readUltraSonicSensorAverage() {
     distanceSum = (distanceSum / (float)count);
     Serial.print("Distance in average: ");
     Serial.println(distanceSum);
-    float distanceInCM = TANDON_HEIGHT_FROM_US_SENSOR - distanceSum;
+    float distanceInCM = (TANDON_HEIGHT_FROM_US_SENSOR - distanceSum);
     return distanceInCM;
   } else {
     Serial.println("❌ No valid ultrasonic readings!");
@@ -611,13 +582,16 @@ bool calibratePH(float known_ph_value, float known_voltage = -1) {
 //  ★ IMPROVED TDS CALIBRATION ★
 //  Supports both one-point and two-point calibration
 // ============================================================
-bool calibrateTDS(float known_tds_value) {
+bool calibrateTDS(float known_tds_value, float known_voltage = -1) {
   Serial.println("\n🧪 Starting TDS Calibration...");
   Serial.printf("   Target TDS: %.2f ppm\n", known_tds_value);
   Serial.printf("   Current calibration points: %d\n", tds_cal.num_points);
   Serial.println("   Taking readings...");
   delay(1000);
   float compensationVoltage = averageTDSVoltage();
+  if (known_voltage != -1) {
+    compensationVoltage = known_voltage;
+  }
   float base_tds = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage
                       - 255.86 * compensationVoltage * compensationVoltage
                       + 857.39 * compensationVoltage) * 0.5;
@@ -697,10 +671,10 @@ bool resetCalibration(const char* sensor_type) {
     preferences.putFloat("ph_offset", 0.0);
     preferences.putBool("ph_cal", false);
     preferences.putInt("ph_points", 0);
-    preferences.putFloat("ph_p1_v", 0.0);
-    preferences.putFloat("ph_p1_ph", 0.0);
-    preferences.putFloat("ph_p2_v", 0.0);
-    preferences.putFloat("ph_p2_ph", 0.0);
+    preferences.putFloat("ph_p1_v", 2515.0);
+    preferences.putFloat("ph_p1_ph", 7.0);
+    preferences.putFloat("ph_p2_v", 3050.0);
+    preferences.putFloat("ph_p2_ph", 4.0);
 
     Serial.println("   ✅ pH calibration reset");
   }
@@ -752,30 +726,26 @@ void printCalibrationStatus() {
   Serial.printf("  Points: %d\n", ph_cal.num_points);
   Serial.printf("  Slope: %.4f\n", ph_cal.slope);
   Serial.printf("  Offset: %.3f\n", ph_cal.offset);
-  Serial.printf("  point1_ph: %.3f\n", ph_cal.point1_ph);
-  Serial.printf("  point2_ph: %.3f\n", ph_cal.point2_ph);
-  Serial.printf("  point1_voltage: %.3f\n", ph_cal.point1_voltage);
-  Serial.printf("  point2_voltage: %.3f\n", ph_cal.point2_voltage);
-  if (ph_cal.num_points >= 1) {
-    Serial.printf("  Point 1: pH %.2f @ %.3fV\n", ph_cal.point1_ph, ph_cal.point1_voltage);
-  }
-  if (ph_cal.num_points >= 2) {
-    Serial.printf("  Point 2: pH %.2f @ %.3fV\n", ph_cal.point2_ph, ph_cal.point2_voltage);
-  }
+  Serial.printf("  Point 1: pH %.2f @ %.3fV\n", ph_cal.point1_ph, ph_cal.point1_voltage);
+  Serial.printf("  Point 2: pH %.2f @ %.3fV\n", ph_cal.point2_ph, ph_cal.point2_voltage);
 
   Serial.println("\nTDS Sensor:");
   Serial.printf("  Calibrated: %s\n", tds_cal.is_calibrated ? "YES" : "NO");
   Serial.printf("  Points: %d\n", tds_cal.num_points);
   Serial.printf("  Slope: %.4f\n", tds_cal.slope);
   Serial.printf("  Offset: %.2f ppm\n", tds_cal.offset);
-  if (tds_cal.num_points >= 1) {
-    Serial.printf("  Point 1: %.0f ppm @ %.3fV\n", tds_cal.point1_tds, tds_cal.point1_voltage);
-  }
-  if (tds_cal.num_points >= 2) {
-    Serial.printf("  Point 2: %.0f ppm @ %.3fV\n", tds_cal.point2_tds, tds_cal.point2_voltage);
-  }
+  Serial.printf("  Point 1: %.0f ppm @ %.3fV\n", tds_cal.point1_tds, tds_cal.point1_voltage);
+  Serial.printf("  Point 2: %.0f ppm @ %.3fV\n", tds_cal.point2_tds, tds_cal.point2_voltage);
 
-  Serial.println("========================\n");
+  Serial.println("\nUS sensor:");
+  Serial.printf("  Calibrated: %s\n", us_cal.is_calibrated ? "YES" : "NO");
+  Serial.printf("  Points: %d\n", us_cal.num_points);
+  Serial.printf("  Slope: %.4f\n", us_cal.slope);
+  Serial.printf("  Offset: %.4f\n", us_cal.offset);
+  Serial.printf("  Point 1: %.0f ppm @ %.3fV\n", us_cal.point1_us, us_cal.point1_voltage);
+  Serial.printf("  Point 2: %.0f ppm @ %.3fV\n", us_cal.point2_us, us_cal.point2_voltage);
+
+  Serial.println("\n========================");
 }
 
 // ============================================================
@@ -791,7 +761,6 @@ void generateData(JsonObject doc) {
   float calibrated_ph = convertToPH();
   float calibrated_tds = convertToTDS();
 
-  resetFlowMeasurement();
   delay(DELAY_FLOW_RATE);
 
   float tmp = round(calibrated_ph * 100) / 100.0;
@@ -812,7 +781,8 @@ void generateData(JsonObject doc) {
   doc["water_temp"] = round(temperature * 10) / 10.0;
   doc["light_intensity"] = readLightIntensity();
   doc["water_level"] = readUltraSonicSensorAverage();
-  doc["flow_rate"] = round(readFlowRate() * 100) / 100.0;
+  doc["flow_rate"] = (round(readFlowRate() * 100) / 100.0) != 0.0 ? 1 : 0;
+  resetFlowMeasurement();
 }
 
 // ============================================================
@@ -1030,9 +1000,15 @@ void setup() {
   Serial.printf( "║  Topic:   %s      ║\n", mqtt_topic);
   Serial.println("╚══════════════════════════════════════╝");
 
+  calculateTwoPointCalibration(
+    ph_cal.point1_voltage, ph_cal.point1_ph,
+    ph_cal.point2_voltage, ph_cal.point2_ph,
+    ph_cal.slope, ph_cal.offset
+  );
+
+  saveCalibrationData();
   loadCalibrationData();
   printCalibrationStatus();
-  // resetCalibration("TDS");
 
   // Begin sensors
   Wire.begin(SDA_PIN, SCL_PIN);
@@ -1104,6 +1080,9 @@ void loop() {
 
       lastSend = millis();
       readingTime = millis() - startReadingTime;
+      if (readingTime > SEND_INTERVAL) {
+        readingTime = 0;
+      }
     }
   }
 }
